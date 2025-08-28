@@ -1,3 +1,4 @@
+        
 # streamlit_app.py
 import streamlit as st
 import pandas as pd
@@ -277,7 +278,9 @@ with c_despesas:
     dep = df_f[df_f["Natureza"]=="Despesa"].groupby("GrupoGerencial", as_index=False)["SaldoGerencial"].sum()
     if not dep.empty:
         dep = dep.sort_values("SaldoGerencial")
-        fig_bar = px.bar(dep, x="SaldoGerencial", y="GrupoGerencial", orientation="h")
+        # >>> ALTERAÇÃO: adiciona cores por GrupoGerencial
+        fig_bar = px.bar(dep, x="SaldoGerencial", y="GrupoGerencial",
+                         orientation="h", color="GrupoGerencial")
         sel = plotly_events(fig_bar, click_event=True, hover_event=False, select_event=False,
                             override_height=420, override_width="100%", key="ev_despesas_grp")
         if sel:
@@ -293,7 +296,8 @@ with c_receitas:
     rec = df_f[df_f["Natureza"]=="Receita"].groupby("Subgrupo", as_index=False)["SaldoGerencial"].sum()
     if not rec.empty:
         rec = rec.sort_values("SaldoGerencial", ascending=False).head(10)
-        fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial")
+        # >>> ALTERAÇÃO: adiciona cores por Subgrupo
+        fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial", color="Subgrupo")
         sel = plotly_events(fig_rec, click_event=True, hover_event=False, select_event=False,
                             override_height=420, override_width="100%", key="ev_receitas_sub")
         if sel:
