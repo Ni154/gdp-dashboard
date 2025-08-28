@@ -1,20 +1,10 @@
 # app.py
 # -----------------------------------------------------------------------------
-# Painel de Balancete (arquivo único)
-# Rodar:  pip install streamlit pandas numpy plotly xlsxwriter openpyxl
-#         streamlit run app.py
-#
+# Painel de Balancete (arquivo único) com cliques nos gráficos para filtrar
 # Entrada: .xlsx OU .zip contendo um .xlsx
-# Abas necessárias no Excel:
+# Abas no Excel:
 #   - Balancete: Empresa, Competencia, ContaCodigo, ContaDescricao, CentroCusto, Devedor, Credor
 #   - Mapa_Classificacao: ContaPrefixo, Natureza, GrupoGerencial, Subgrupo, Sinal, TipoOperacional
-#
-# O app:
-#  - Normaliza nomes de colunas (alias), corrige vírgula decimal pt-BR.
-#  - Faz "merge" por prefixo do código contábil (3 → 2 → 1 níveis).
-#  - KPIs: Receita, Despesa, Resultado, Margem %.
-#  - Gráficos: Resultado por mês, Despesas por Grupo, Top 10 Receitas por Subgrupo.
-#  - Exporta Excel (Detalhado + Resumos) e CSV.
 # -----------------------------------------------------------------------------
 
 import streamlit as st
@@ -23,19 +13,19 @@ import numpy as np
 from io import BytesIO
 import zipfile, io
 import plotly.express as px
+from streamlit_plotly_events import plotly_events
 
 # -----------------------------
 # Config da página
 # -----------------------------
-st.set_page_config(page_title="Painel Balancete (Único)", page_icon="📘", layout="wide")
-st.title("📘 Painel de Balancete — arquivo único")
-st.caption("Envie um .xlsx (ou .zip com .xlsx) contendo as abas **Balancete** e **Mapa_Classificacao**. Opcionalmente, use dados de exemplo para testar.")
+st.set_page_config(page_title="Balancete (clicável)", page_icon="📘", layout="wide")
+st.title("📘 Painel de Balancete — com clique para filtrar")
+st.caption("Envie .xlsx (ou .zip com .xlsx) com as abas **Balancete** e **Mapa_Classificacao**. Clique nos gráficos para filtrar KPIs e Tabela.")
 
 # -----------------------------
 # Helpers
 # -----------------------------
 def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Normaliza nomes de colunas e aplica alguns aliases comuns."""
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     aliases = {
@@ -53,7 +43,6 @@ def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def split_prefix(code, n_segments: int):
-    """Pega os primeiros N níveis do código contábil. Ex.: 4.1.2.01 -> n=3 -> 4.1.2"""
     if pd.isna(code):
         return None
     parts = [p for p in str(code).split(".") if p != ""]
@@ -62,7 +51,6 @@ def split_prefix(code, n_segments: int):
     return ".".join(parts[: min(n_segments, len(parts))])
 
 def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificacao"):
-    """Lê .xlsx direto ou .zip contendo um .xlsx. Retorna (balancete, mapa)."""
     def _read_xlsx(flike):
         xls = pd.ExcelFile(flike)
         bal = pd.read_excel(xls, sheet_name=sheet_bal)
@@ -79,10 +67,8 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
                 data = xf.read()
             bal, mapa = _read_xlsx(io.BytesIO(data))
     else:
-        # xlsx direto
         bal, mapa = _read_xlsx(uploaded)
 
-    # normaliza
     bal = _norm_cols(bal)
     mapa = _norm_cols(mapa)
 
@@ -94,8 +80,8 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
         if col in bal.columns:
             bal[col] = (
                 bal[col].astype(str)
-                .str.replace(".", "", regex=False)     # remove milhar
-                .str.replace(",", ".", regex=False)    # vírgula -> ponto
+                .str.replace(".", "", regex=False)
+                .str.replace(",", ".", regex=False)
             )
             bal[col] = pd.to_numeric(bal[col], errors="coerce").fillna(0.0)
 
@@ -109,13 +95,11 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
     else:
         mapa["Sinal"] = 1.0
 
-    # colunas mínimas
     need_bal = {"Empresa","Competencia","ContaCodigo","ContaDescricao","Devedor","Credor"}
     miss = need_bal - set(bal.columns)
     if miss:
         raise ValueError(f"Planilha Balancete faltando colunas obrigatórias: {miss}")
 
-    # mapa mínimo
     for c in ["ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional"]:
         if c not in mapa.columns:
             mapa[c] = np.nan
@@ -124,7 +108,6 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
     return bal, mapa
 
 def merge_classify(bal: pd.DataFrame, mapa: pd.DataFrame) -> pd.DataFrame:
-    """Casa o balancete com o mapa por prefixo (3 -> 2 -> 1) e cria métricas."""
     df = bal.copy()
     df["prefix3"] = df["ContaCodigo"].apply(lambda x: split_prefix(x, 3))
     df["prefix2"] = df["ContaCodigo"].apply(lambda x: split_prefix(x, 2))
@@ -147,13 +130,11 @@ def merge_classify(bal: pd.DataFrame, mapa: pd.DataFrame) -> pd.DataFrame:
     out["Sinal"]           = coalesce(m3.get("m3_Sinal"),           m2.get("m2_Sinal"),           m1.get("m1_Sinal")).fillna(1.0)
     out["TipoOperacional"] = coalesce(m3.get("m3_TipoOperacional"), m2.get("m2_TipoOperacional"), m1.get("m1_TipoOperacional"))
 
-    # métricas
     out["Saldo"] = out["Devedor"] - out["Credor"]
     out["Sinal"] = pd.to_numeric(out["Sinal"], errors="coerce").fillna(1.0)
     out["SaldoGerencial"] = out["Saldo"] * out["Sinal"]
     out["Competencia"] = pd.to_datetime(out["Competencia"], errors="coerce")
     out["AnoMes"] = out["Competencia"].dt.strftime("%Y-%m")
-
     return out
 
 def metric_fmt(v):
@@ -172,7 +153,6 @@ def to_excel_bytes(dfs: dict) -> bytes:
 
 @st.cache_data
 def sample_excel_bytes() -> bytes:
-    """Gera um Excel de exemplo em memória (para teste rápido)."""
     months = pd.period_range("2025-01", "2025-08", freq="M")
     competencias = [pd.Timestamp(m.start_time.date()) for m in months]
     rows = []
@@ -212,18 +192,18 @@ def sample_excel_bytes() -> bytes:
 # -----------------------------
 with st.sidebar:
     st.header("⚙️ Entrada")
-    use_sample = st.toggle("Usar dados de exemplo (sem enviar arquivo)", value=False)
+    use_sample = st.toggle("Usar dados de exemplo (sem enviar arquivo)", value=False, key="use_sample")
     up = None
     if not use_sample:
-        up = st.file_uploader("Envie .xlsx ou .zip com .xlsx", type=["xlsx","zip"])
-    sheet_bal = st.text_input("Aba do Balancete", "Balancete")
-    sheet_map = st.text_input("Aba do Mapa", "Mapa_Classificacao")
-    st.download_button("⬇️ Baixar Excel de Exemplo", data=sample_excel_bytes(), file_name="Exemplo_Balancete.xlsx")
+        up = st.file_uploader("Envie .xlsx ou .zip com .xlsx", type=["xlsx","zip"], key="uploader")
+    sheet_bal = st.text_input("Aba do Balancete", "Balancete", key="sheet_bal")
+    sheet_map = st.text_input("Aba do Mapa", "Mapa_Classificacao", key="sheet_map")
+    st.download_button("⬇️ Baixar Excel de Exemplo", data=sample_excel_bytes(), file_name="Exemplo_Balancete.xlsx", key="dl_sample")
 
 # -----------------------------
 # Carregar dados
 # -----------------------------
-if use_sample:
+if st.session_state.get("use_sample", False):
     try:
         bal, mapa = read_excel_like(io.BytesIO(sample_excel_bytes()), sheet_bal, sheet_map)
     except Exception as e:
@@ -242,33 +222,66 @@ else:
 df = merge_classify(bal, mapa)
 
 # -----------------------------
-# Filtros
+# Filtros (keys estáveis)
 # -----------------------------
 empresas = sorted(df["Empresa"].dropna().unique().tolist())
 naturezas = sorted(df["Natureza"].dropna().unique().tolist()) if "Natureza" in df.columns else []
-cc_list = sorted(df["CentroCusto"].dropna().unique().tolist()) if "CentroCusto" in df.columns else []
+cc_list  = sorted(df["CentroCusto"].dropna().unique().tolist()) if "CentroCusto" in df.columns else []
 
 colf1, colf2, colf3 = st.columns(3)
 with colf1:
-    f_emp = st.multiselect("Empresa", empresas, default=empresas)
+    f_emp = st.multiselect("Empresa", empresas, default=empresas, key="f_emp")
 with colf2:
-    f_nat = st.multiselect("Natureza", naturezas or ["Receita","Despesa"], default=naturezas or ["Receita","Despesa"])
+    f_nat = st.multiselect("Natureza", naturezas or ["Receita","Despesa"],
+                           default=naturezas or ["Receita","Despesa"], key="f_nat")
 with colf3:
-    f_cc = st.multiselect("Centro de Custo", cc_list, default=cc_list) if cc_list else None
+    f_cc = st.multiselect("Centro de Custo", cc_list, default=cc_list, key="f_cc") if cc_list else None
 
 min_date = df["Competencia"].min().date()
 max_date = df["Competencia"].max().date()
-f_date = st.slider("Competência (período)", min_value=min_date, max_value=max_date, value=(min_date, max_date))
+f_date = st.slider("Competência (período)",
+                   min_value=min_date, max_value=max_date,
+                   value=(min_date, max_date),
+                   key="f_periodo")
 
+# -----------------------------
+# Aplicar filtros base
+# -----------------------------
 mask = (
-    df["Empresa"].isin(f_emp) &
-    df["Competencia"].between(pd.to_datetime(f_date[0]), pd.to_datetime(f_date[1])) &
-    ((df["Natureza"].isin(f_nat)) if df["Natureza"].notna().any() else True)
+    df["Empresa"].isin(f_emp)
+    & df["Competencia"].between(pd.to_datetime(f_date[0]), pd.to_datetime(f_date[1]))
+    & ((df["Natureza"].isin(f_nat)) if df["Natureza"].notna().any() else True)
 )
 if f_cc is not None:
     mask &= df["CentroCusto"].isin(f_cc)
 
-df_f = df.loc[mask].copy()
+df_base = df.loc[mask].copy()
+
+# -----------------------------
+# Estado dos filtros por clique
+# -----------------------------
+if "click_filters" not in st.session_state:
+    st.session_state.click_filters = {"GrupoGerencial": None, "Subgrupo": None, "AnoMes": None}
+
+col_reset1, col_reset2, col_reset3 = st.columns(3)
+with col_reset1:
+    if st.button("🔄 Limpar filtro de Grupo", key="btn_reset_grp"):
+        st.session_state.click_filters["GrupoGerencial"] = None
+with col_reset2:
+    if st.button("🔄 Limpar filtro de Subgrupo", key="btn_reset_sub"):
+        st.session_state.click_filters["Subgrupo"] = None
+with col_reset3:
+    if st.button("🔄 Limpar filtro de Mês (AnoMes)", key="btn_reset_mes"):
+        st.session_state.click_filters["AnoMes"] = None
+
+# Aplica os filtros de clique
+df_f = df_base.copy()
+if st.session_state.click_filters["GrupoGerencial"]:
+    df_f = df_f[df_f["GrupoGerencial"] == st.session_state.click_filters["GrupoGerencial"]]
+if st.session_state.click_filters["Subgrupo"]:
+    df_f = df_f[df_f["Subgrupo"] == st.session_state.click_filters["Subgrupo"]]
+if st.session_state.click_filters["AnoMes"]:
+    df_f = df_f[df_f["AnoMes"] == st.session_state.click_filters["AnoMes"]]
 
 # -----------------------------
 # KPIs
@@ -278,61 +291,97 @@ receita = df_f.loc[df_f["Natureza"]=="Receita","SaldoGerencial"].sum()
 despesa = df_f.loc[df_f["Natureza"]=="Despesa","SaldoGerencial"].sum()
 resultado = receita + despesa
 margem = (resultado / receita) if receita else np.nan
-with colA: st.metric("Receita", metric_fmt(receita))
-with colB: st.metric("Despesa", metric_fmt(despesa))
-with colC: st.metric("Resultado", metric_fmt(resultado))
-with colD: st.metric("Margem %", metric_fmt((margem*100) if pd.notna(margem) else 0))
+with colA: st.metric("Receita", metric_fmt(receita), key="kpi_receita")
+with colB: st.metric("Despesa", metric_fmt(despesa), key="kpi_despesa")
+with colC: st.metric("Resultado", metric_fmt(resultado), key="kpi_resultado")
+with colD: st.metric("Margem %", metric_fmt((margem*100) if pd.notna(margem) else 0), key="kpi_margem")
 
 st.markdown("---")
 
 # -----------------------------
-# Gráficos
+# Containers fixos (DOM estável)
 # -----------------------------
-st.subheader("📈 Resultado por mês (Saldo Gerencial)")
-series = df_f.groupby("AnoMes", as_index=False)["SaldoGerencial"].sum().sort_values("AnoMes")
-if not series.empty:
-    st.plotly_chart(px.line(series, x="AnoMes", y="SaldoGerencial", markers=True), use_container_width=True)
-else:
-    st.info("Sem dados no período.")
+c_resultado = st.container()
+c_despesas  = st.container()
+c_receitas  = st.container()
+c_tabela    = st.container()
+c_export    = st.container()
 
-st.subheader("📊 Despesas por Grupo")
-dep = df_f[df_f["Natureza"]=="Despesa"].groupby("GrupoGerencial", as_index=False)["SaldoGerencial"].sum()
-if not dep.empty:
-    dep = dep.sort_values("SaldoGerencial")
-    st.plotly_chart(px.bar(dep, x="SaldoGerencial", y="GrupoGerencial", orientation="h"), use_container_width=True)
-else:
-    st.info("Sem dados de despesa nos filtros atuais.")
+with c_resultado:
+    st.subheader("📈 Resultado por Mês (clique para filtrar)")
+    series = df_f.groupby("AnoMes", as_index=False)["SaldoGerencial"].sum().sort_values("AnoMes")
+    if not series.empty:
+        fig_line = px.line(series, x="AnoMes", y="SaldoGerencial", markers=True)
+        sel_points = plotly_events(fig_line, click_event=True, hover_event=False,
+                                   select_event=False, override_height=420, override_width="100%", key="ev_resultado_mes")
+        if sel_points:
+            x_val = sel_points[0].get("x")
+            if x_val:
+                st.session_state.click_filters["AnoMes"] = str(x_val)
+                st.success(f"Filtro aplicado: AnoMes = {st.session_state.click_filters['AnoMes']}")
+    else:
+        st.info("Sem dados no período.")
 
-st.subheader("🏆 Top 10 Receitas por Subgrupo")
-rec = df_f[df_f["Natureza"]=="Receita"].groupby("Subgrupo", as_index=False)["SaldoGerencial"].sum()
-if not rec.empty:
-    rec = rec.sort_values("SaldoGerencial", ascending=False).head(10)
-    st.plotly_chart(px.bar(rec, x="Subgrupo", y="SaldoGerencial"), use_container_width=True)
-else:
-    st.info("Sem dados de receita nos filtros atuais.")
+with c_despesas:
+    st.subheader("📊 Despesas por Grupo (clique para filtrar)")
+    dep = df_f[df_f["Natureza"]=="Despesa"].groupby("GrupoGerencial", as_index=False)["SaldoGerencial"].sum()
+    if not dep.empty:
+        dep = dep.sort_values("SaldoGerencial")
+        fig_bar = px.bar(dep, x="SaldoGerencial", y="GrupoGerencial", orientation="h")
+        sel_grp = plotly_events(fig_bar, click_event=True, hover_event=False,
+                                select_event=False, override_height=420, override_width="100%", key="ev_despesas_grp")
+        if sel_grp:
+            y_val = sel_grp[0].get("y")
+            if y_val:
+                st.session_state.click_filters["GrupoGerencial"] = str(y_val)
+                st.success(f"Filtro aplicado: GrupoGerencial = {st.session_state.click_filters['GrupoGerencial']}")
+    else:
+        st.info("Sem dados de despesa nos filtros atuais.")
 
-st.markdown("---")
+with c_receitas:
+    st.subheader("🏆 Top 10 Receitas por Subgrupo (clique para filtrar)")
+    rec = df_f[df_f["Natureza"]=="Receita"].groupby("Subgrupo", as_index=False)["SaldoGerencial"].sum()
+    if not rec.empty:
+        rec = rec.sort_values("SaldoGerencial", ascending=False).head(10)
+        fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial")
+        sel_sub = plotly_events(fig_rec, click_event=True, hover_event=False,
+                                select_event=False, override_height=420, override_width="100%", key="ev_receitas_sub")
+        if sel_sub:
+            x_val = sel_sub[0].get("x")
+            if x_val:
+                st.session_state.click_filters["Subgrupo"] = str(x_val)
+                st.success(f"Filtro aplicado: Subgrupo = {st.session_state.click_filters['Subgrupo']}")
+    else:
+        st.info("Sem dados de receita nos filtros atuais.")
 
-# -----------------------------
-# Tabela + Exportações
-# -----------------------------
-st.subheader("Tabela detalhada")
-show_cols = [
-    "Empresa","Competencia","ContaCodigo","ContaDescricao","CentroCusto",
-    "Natureza","GrupoGerencial","Subgrupo","Devedor","Credor",
-    "Saldo","Sinal","SaldoGerencial","AnoMes"
-]
-show_cols = [c for c in show_cols if c in df_f.columns]
-st.dataframe(df_f[show_cols].sort_values(["Competencia","ContaCodigo"]).reset_index(drop=True), use_container_width=True)
+with c_tabela:
+    st.subheader("Tabela detalhada (após filtros por clique)")
+    show_cols = [
+        "Empresa","Competencia","ContaCodigo","ContaDescricao","CentroCusto",
+        "Natureza","GrupoGerencial","Subgrupo","Devedor","Credor",
+        "Saldo","Sinal","SaldoGerencial","AnoMes"
+    ]
+    show_cols = [c for c in show_cols if c in df_f.columns]
+    st.dataframe(
+        df_f[show_cols].sort_values(["Competencia","ContaCodigo"]).reset_index(drop=True),
+        use_container_width=True,
+        key="grid_detalhe",
+    )
 
-st.subheader("Exportações")
-pivot_mes = df_f.pivot_table(index="AnoMes", columns="Natureza", values="SaldoGerencial", aggfunc="sum", fill_value=0).reset_index()
-by_grupo = df_f.groupby(["Natureza","GrupoGerencial"], as_index=False)["SaldoGerencial"].sum().sort_values(["Natureza","SaldoGerencial"], ascending=[True, False])
+with c_export:
+    st.subheader("Exportações")
+    pivot_mes = df_f.pivot_table(index="AnoMes", columns="Natureza", values="SaldoGerencial",
+                                 aggfunc="sum", fill_value=0).reset_index()
+    by_grupo = df_f.groupby(["Natureza","GrupoGerencial"], as_index=False)["SaldoGerencial"] \
+                   .sum().sort_values(["Natureza","SaldoGerencial"], ascending=[True, False])
 
-excel_bytes = to_excel_bytes({
-    "Detalhado": df_f[show_cols],
-    "Resumo_Mensal": pivot_mes,
-    "Por_Grupo": by_grupo
-})
-st.download_button("⬇️ Excel (Detalhado + Resumos)", data=excel_bytes, file_name="analise_balancete.xlsx")
-st.download_button("⬇️ CSV Detalhado", data=df_f.to_csv(index=False).encode("utf-8"), file_name="balancete_detalhado.csv")
+    excel_bytes = to_excel_bytes({
+        "Detalhado": df_f[show_cols],
+        "Resumo_Mensal": pivot_mes,
+        "Por_Grupo": by_grupo
+    })
+    st.download_button("⬇️ Excel (Detalhado + Resumos)", data=excel_bytes,
+                       file_name="analise_balancete.xlsx", key="dl_excel")
+    st.download_button("⬇️ CSV Detalhado",
+                       data=df_f.to_csv(index=False).encode("utf-8"),
+                       file_name="balancete_detalhado.csv", key="dl_csv")
