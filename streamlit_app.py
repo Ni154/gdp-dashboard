@@ -237,11 +237,17 @@ receita = df_f.loc[df_f["Natureza"]=="Receita","SaldoGerencial"].sum()
 despesa = df_f.loc[df_f["Natureza"]=="Despesa","SaldoGerencial"].sum()
 resultado = receita + despesa
 margem = (resultado / receita) if receita else np.nan
-with colA: st.metric("Receita", metric_fmt(receita), key="kpi_receita")
-with colB: st.metric("Despesa", metric_fmt(despesa), key="kpi_despesa")
-with colC: st.metric("Resultado", metric_fmt(resultado), key="kpi_resultado")
-with colD: st.metric("Margem %", metric_fmt((margem*100) if pd.notna(margem) else 0), key="kpi_margem")
+with colA:
+    st.metric("Receita", metric_fmt(receita))
 
+with colB:
+    st.metric("Despesa", metric_fmt(despesa))
+
+with colC:
+    st.metric("Resultado", metric_fmt(resultado))
+
+with colD:
+    st.metric("Margem %", metric_fmt((margem * 100) if pd.notna(margem) else 0))
 st.markdown("---")
 
 # ---------- containers fixos (DOM estável)
