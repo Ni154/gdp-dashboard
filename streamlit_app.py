@@ -15,14 +15,13 @@ import numpy as np
 import plotly.express as px
 from streamlit_plotly_events import plotly_events
 
-# (opcional) debug — pode remover
+# (opcional) debug do runtime — pode remover
 st.caption(f"Python em uso: {sys.version}")
 
 st.title("📘 Painel de Balancete — com clique para filtrar")
 st.caption(
-    "Aceita: (1) Balancete clássico (abas Balancete/Mapa_Classificacao) **ou** "
-    "(2) planilha **matriz** (colunas Conta, Descrição, centros e Total). "
-    "Clique nos gráficos para filtrar KPIs e Tabela."
+    "Aceita balancete clássico (abas Balancete/Mapa_Classificacao) ou planilha matriz "
+    "(colunas Conta, Descrição, centros e Total). Clique nos gráficos para filtrar."
 )
 
 # ===================== utils =====================
@@ -41,10 +40,10 @@ def parse_comp_from_filename(name: str) -> pd.Timestamp | None:
     if not name:
         return None
     s = Path(name).stem
-    m = re.search(r'(?P<m>\d{2})[ _\.-/](?P<y>\d{4})', s) or \
-        re.search(r'(?P<y>\d{4})[ _\.-/](?P<m>\d{2})', s) or \
-        re.search(r'(?P<m>\d{2})(?P<y>\d{4})$', s) or \
-        re.search(r'(?P<y>\d{4})(?P<m>\d{2})$', s)
+    m = re.search(r'(?P<m>\d{2})[ _\.-/](?P<y>\d{4})', s) \
+        or re.search(r'(?P<y>\d{4})[ _\.-/](?P<m>\d{2})', s) \
+        or re.search(r'(?P<m>\d{2})(?P<y>\d{4})$', s) \
+        or re.search(r'(?P<y>\d{4})(?P<m>\d{2})$', s)
     if m:
         y = int(m.group('y')); mth = int(m.group('m'))
         try: return pd.Timestamp(datetime(y, mth, 1))
@@ -253,7 +252,7 @@ with st.sidebar:
         sheet_map = st.text_input("Aba do Mapa", "Mapa_Classificacao", key="sheet_map")
     else:
         sheet_bal = "Balancete"; sheet_map = "Mapa_Classificacao"
-        st.caption("Formato **matriz** detectado — nomes de aba ignorados.")
+        st.caption("Formato matriz detectado — nomes de aba ignorados.")
 
 # ===================== Load =====================
 @st.cache_data
@@ -286,12 +285,15 @@ def sample_excel_bytes() -> bytes:
 
 if st.session_state.get("use_sample", False):
     bal, mapa = read_excel_like(io.BytesIO(sample_excel_bytes()), "Balancete", "Mapa_Classificacao", "amostra.xlsx")
+    st.session_state["last_loaded_file"] = "amostra.xlsx"
 else:
     if up is not None:
         bal, mapa = read_excel_like(up, sheet_bal, sheet_map, getattr(up, "name", None))
+        st.session_state["last_loaded_file"] = getattr(up, "name", None) or "arquivo_sem_nome"
     elif default_path.exists():
         with default_path.open("rb") as f:
             bal, mapa = read_excel_like(f, "Balancete", "Mapa_Classificacao", default_hint)
+        st.session_state["last_loaded_file"] = default_hint
         st.info("Carregado arquivo padrão **08-2025.xlsx** do repositório.")
     else:
         st.info("Envie um arquivo (.xlsx) ou coloque **08-2025.xlsx** na raiz do app.")
@@ -314,7 +316,7 @@ with colf2:
 with colf3:
     f_cc = st.multiselect("Centro de Custo", cc_list, default=cc_list, key="f_cc") if cc_list else None
 
-# ===================== SLIDER ROBUSTO (com reset se valor antigo estiver inválido) =====================
+# ===================== SLIDER ROBUSTO (chave dinâmica para evitar conflito de estado) =====================
 comp_series = pd.to_datetime(df["Competencia"], errors="coerce")
 if comp_series.notna().any():
     min_date = comp_series.min().date()
@@ -325,34 +327,21 @@ else:
     max_date = min_date
 
 is_range = min_date < max_date
-
-def _in_bounds(val, lo, hi):
-    try:
-        if isinstance(val, (list, tuple)) and len(val) == 2:
-            a, b = val
-            return (lo <= a <= hi) and (lo <= b <= hi) and (a <= b)
-        return lo <= val <= hi
-    except Exception:
-        return False
-
-# limpa estado se tipo mudou OU se valor ficou fora do novo intervalo
-if "f_periodo" in st.session_state:
-    prev = st.session_state["f_periodo"]
-    prev_is_range = isinstance(prev, (list, tuple))
-    if (is_range != prev_is_range) or (not _in_bounds(prev, min_date, max_date)):
-        del st.session_state["f_periodo"]
+file_sig = f"{st.session_state.get('last_loaded_file','')}"
+range_sig = "range" if is_range else "single"
+slider_key = f"f_periodo::{file_sig}::{min_date.isoformat()}::{max_date.isoformat()}::{range_sig}"
 
 if is_range:
+    default_val = (min_date, max_date)
     f_date = st.slider("Competência (período)",
                        min_value=min_date, max_value=max_date,
-                       value=st.session_state.get("f_periodo", (min_date, max_date)),
-                       key="f_periodo")
+                       value=default_val, key=slider_key)
     start_dt = pd.to_datetime(f_date[0]); end_dt = pd.to_datetime(f_date[1])
 else:
+    default_val = min_date
     f_date = st.slider("Competência (período)",
                        min_value=min_date, max_value=max_date,
-                       value=st.session_state.get("f_periodo", min_date),
-                       key="f_periodo")
+                       value=default_val, key=slider_key)
     start_dt = pd.to_datetime(f_date); end_dt = pd.to_datetime(f_date)
 
 mask = (
