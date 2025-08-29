@@ -2,21 +2,21 @@
 from datetime import date
 from io import BytesIO
 import unicodedata, re
-
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# ───────────────────────────── Page config ─────────────────────────────
+# ───────────── Page config ─────────────
 st.set_page_config(page_title="Análise de Balancete — Dashboard", page_icon="📊", layout="wide")
 st.title("📊 Análise de Balancete — Dashboard")
 st.caption(
     "Importe seu arquivo e vamos fazer a análise para melhor tomada de decisão. "
-    "Formato esperado (ou equivalentes): **Empresa, Competencia, ContaCodigo, ContaDescricao, CentroCusto, Devedor, Credor**."
+    "Suporta dois formatos: (A) **Matriz** ⇒ colunas `Conta`, `Descrição`, *departamentos*, `Total`; "
+    "(B) **Longo** ⇒ colunas `Empresa`, `Competencia`, `ContaCodigo`, `ContaDescricao`, `CentroCusto`, `Devedor`, `Credor`."
 )
 
-# ───────────────────── helpers: header, números, datas ─────────────────
+# ───────────── Helpers ─────────────
 def _norm_token(s: str) -> str:
     s = unicodedata.normalize("NFKD", str(s))
     s = "".join(ch for ch in s if not unicodedata.combining(ch))
@@ -29,7 +29,7 @@ def strip_accents_upper(s: str) -> str:
     return s.upper().strip()
 
 CANON = {
-    "empresacnpj":"Empresa","empresa":"Empresa",
+    "empresa":"Empresa","empresacnpj":"Empresa",
     "competencia":"Competencia","datacompetencia":"Competencia","mescompetencia":"Competencia","mesref":"Competencia",
     "mes":"Mes","ano":"Ano",
     "contacodigo":"ContaCodigo","conta":"ContaCodigo","contacontabil":"ContaCodigo","codigoconta":"ContaCodigo",
@@ -48,6 +48,7 @@ def strong_rename(df: pd.DataFrame) -> pd.DataFrame:
         if tgt and tgt not in used:
             m[c] = tgt; used.add(tgt)
     out = df.rename(columns=m).copy()
+    # Ajustes óbvios pt-br
     if "Conta" in out.columns and "ContaCodigo" not in out.columns:
         out.rename(columns={"Conta":"ContaCodigo"}, inplace=True)
     if "Descrição" in out.columns and "ContaDescricao" not in out.columns:
@@ -69,30 +70,20 @@ def to_num_safe(series: pd.Series) -> pd.Series:
             try: return float(x.replace(",", "."))
             except: pass
         try:
-            return float(x.replace(",", ""))  # 123,456.78 ou 1234.56
+            return float(x.replace(",", ""))  # 123,456.78
         except: return np.nan
     return s.map(_parse)
 
-def infer_competencia(df: pd.DataFrame, up_name: str|None) -> pd.Series:
-    if "Competencia" in df.columns:
-        comp = pd.to_datetime(df["Competencia"], errors="coerce")
-        if comp.notna().any(): return comp
-    if {"Mes","Ano"}.issubset(df.columns):
-        try:
-            mes = pd.to_numeric(df["Mes"], errors="coerce").fillna(1).astype(int).clip(1,12)
-            ano = pd.to_numeric(df["Ano"], errors="coerce").fillna(date.today().year).astype(int)
-            comp = pd.to_datetime(dict(year=ano, month=mes, day=1), errors="coerce")
-            if comp.notna().any(): return comp
+def infer_competencia_from(fname: str|None) -> pd.Timestamp:
+    if not fname:
+        return pd.Timestamp(date.today().replace(day=1))
+    m = re.search(r"(?:(\d{2})[-_\.](\d{4}))|(?:(\d{4})[-_\.](\d{2}))", fname)
+    if m:
+        if m.group(1): mm, yy = int(m.group(1)), int(m.group(2))   # MM-YYYY
+        else:          yy, mm = int(m.group(3)), int(m.group(4))   # YYYY-MM
+        try: return pd.Timestamp(year=yy, month=mm, day=1)
         except: pass
-    if up_name:
-        m = re.search(r"(?:(\d{2})[-_\.](\d{4}))|(?:(\d{4})[-_\.](\d{2}))", up_name)
-        if m:
-            if m.group(1): mm, yy = int(m.group(1)), int(m.group(2))
-            else:          yy, mm = int(m.group(3)), int(m.group(4))
-            try:
-                return pd.Series(pd.Timestamp(year=yy, month=mm, day=1), index=df.index)
-            except: pass
-    return pd.Series(pd.Timestamp(date.today().replace(day=1)), index=df.index)
+    return pd.Timestamp(date.today().replace(day=1))
 
 def money(v):
     try: return f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
@@ -105,16 +96,14 @@ def to_excel_bytes(dfs: dict) -> bytes:
             d.to_excel(w, index=False, sheet_name=name[:31] or "Dados")
     out.seek(0); return out
 
-# ───────────────────────── Persistência do upload ──────────────────────
+# ───────────── Sidebar / Persistência ─────────────
 with st.sidebar:
     st.header("📥 Importação")
     st.caption("**Importe seu arquivo aqui** e vamos fazer a análise para melhor tomada de decisão.")
-    up_new = st.file_uploader("Arraste e solte o .xlsx (1 aba)", type=["xlsx"], key="uploader")
+    up_new = st.file_uploader("Importe seu arquivo .xlsx (1 aba)", type=["xlsx"], key="uploader")
     colb1, colb2 = st.columns(2)
-    with colb1:
-        clear_btn = st.button("🧹 Trocar arquivo", use_container_width=True)
-    with colb2:
-        analyze_btn = st.button("🔎 Recalcular", use_container_width=True)
+    with colb1: clear_btn = st.button("🧹 Trocar arquivo", use_container_width=True)
+    with colb2: _ = st.button("🔎 Recalcular", use_container_width=True)
 
 if clear_btn:
     for k in ["file_bytes","file_name"]: st.session_state.pop(k, None)
@@ -130,109 +119,126 @@ if "file_bytes" not in st.session_state:
 file_bytes = st.session_state["file_bytes"]
 file_name  = st.session_state.get("file_name", "arquivo.xlsx")
 
-# ─────────────────────────── Leitura + preparo ─────────────────────────
+# ───────────── Leitura + detecção de formato + normalização ─────────────
 @st.cache_data(show_spinner=True)
-def load_dataframe_from_bytes(b: bytes, fname: str):
+def load_and_prepare(b: bytes, fname: str):
     xls = pd.ExcelFile(BytesIO(b))
     sheet = xls.sheet_names[0]
     raw = pd.read_excel(xls, sheet_name=sheet)
     df = strong_rename(raw)
 
+    # Detecta formato MATRIZ: tem 'ContaCodigo' e 'ContaDescricao' e 'Total' e várias outras colunas numéricas
+    is_matrix = ("ContaDescricao" in df.columns) and ("Total" in df.columns) and (
+        df.columns.difference(["ContaCodigo","ContaDescricao","Total"]).size >= 1
+    ) and ("CentroCusto" not in df.columns)
+
     notes = []
-    if "Empresa" not in df.columns:
-        df["Empresa"] = "Empresa"; notes.append("Empresa criada como 'Empresa' (default).")
+    comp = infer_competencia_from(fname)
 
-    comp = infer_competencia(df, fname)
-    if "Competencia" not in df.columns:
-        notes.append("Competencia ausente: inferida (Mes/Ano ou nome do arquivo; senão mês atual).")
-    elif comp.isna().all():
-        notes.append("Competencia inválida: normalizada (Mes/Ano ou nome do arquivo; senão mês atual).")
-    df["Competencia"] = comp
+    if is_matrix:
+        # MATRIZ → melt para LONGO
+        fixed = ["ContaCodigo","ContaDescricao","Total"]
+        dept_cols = [c for c in df.columns if c not in fixed]
+        # Garante numérico nos departamentos
+        for c in dept_cols: df[c] = to_num_safe(df[c]).fillna(0.0)
 
-    if "ContaCodigo" not in df.columns:
-        raise ValueError("Não encontrei coluna de conta (Conta/ContaCódigo/ContaContábil).")
-    if "ContaDescricao" not in df.columns:
-        df["ContaDescricao"] = df["ContaCodigo"].astype(str); notes.append("ContaDescricao copiada de ContaCodigo.")
-    if "CentroCusto" not in df.columns:
-        df["CentroCusto"] = "Geral"; notes.append("CentroCusto ausente: 'Geral'.")
+        long = df.melt(id_vars=["ContaCodigo","ContaDescricao"], value_vars=dept_cols,
+                       var_name="CentroCusto", value_name="Valor")
+        long["Empresa"] = "Empresa"
+        long["Competencia"] = comp
+        # Natureza por descrição
+        desc_up = long["ContaDescricao"].astype(str).str.upper()
+        long["Natureza"] = np.where(desc_up.str.contains("RECEITA|ENTRADA", regex=True), "Receita", "Despesa")
+        long["Devedor"] = np.where(long["Natureza"].eq("Despesa"), long["Valor"], 0.0)
+        long["Credor"]  = np.where(long["Natureza"].eq("Receita"), long["Valor"], 0.0)
+        # Sinal: Receita (-1) / Despesa (+1) para manter convenção SaldoGerencial (despesa positiva)
+        long["Sinal"] = np.where(long["Natureza"].eq("Receita"), -1.0, 1.0)
+        long["Saldo"] = long["Devedor"] - long["Credor"]
+        long["SaldoGerencial"] = long["Saldo"] * long["Sinal"]
+        long["Competencia"] = pd.to_datetime(long["Competencia"], errors="coerce")
+        long["AnoMes"] = long["Competencia"].dt.strftime("%Y-%m")
 
-    # valores
-    if "Devedor" not in df.columns and "Credor" not in df.columns:
-        cand = next((c for c in ["Saldo","Valor","Total"] if c in df.columns), None)
-        if cand:
-            v = to_num_safe(df[cand]).fillna(0.0)
-            df["Devedor"] = np.where(v >= 0, v, 0.0)
-            df["Credor"]  = np.where(v < 0, -v, 0.0)
-            notes.append(f"Sem Devedor/Credor: derivado de '{cand}'.")
-        else:
-            df["Devedor"] = 0.0; df["Credor"] = 0.0
-            notes.append("Sem Devedor/Credor/Saldo/Valor: criado Devedor=0 e Credor=0.")
+        # Normaliza CentroCusto para comparação robusta
+        long["CentroCusto"] = long["CentroCusto"].astype(str).str.strip()
+        long["CentroCustoNorm"] = long["CentroCusto"].map(strip_accents_upper)
+        for c in ["Empresa","ContaCodigo","ContaDescricao"]:
+            long[c] = long[c].astype(str).str.strip()
+
+        notes.append("Formato **MATRIZ** detectado e convertido para análise por centro de custo.")
+        return long, notes, True, dept_cols  # dept_cols úteis para comparador
     else:
-        if "Devedor" not in df.columns: df["Devedor"] = 0.0; notes.append("Devedor ausente: 0.")
-        if "Credor"  not in df.columns: df["Credor"]  = 0.0; notes.append("Credor ausente: 0.")
+        # LONGO tradicional
+        # Garantias mínimas
+        if "Empresa" not in df.columns: df["Empresa"] = "Empresa"; notes.append("Empresa ausente: 'Empresa'.")
+        if "Competencia" not in df.columns: df["Competencia"] = comp; notes.append("Competencia inferida pelo nome do arquivo.")
+        df["Competencia"] = pd.to_datetime(df["Competencia"], errors="coerce")
+        if "ContaCodigo" not in df.columns: raise ValueError("Coluna de conta ausente (Conta/ContaCódigo/ContaContábil).")
+        if "ContaDescricao" not in df.columns:
+            df["ContaDescricao"] = df["ContaCodigo"].astype(str); notes.append("ContaDescricao copiada de ContaCodigo.")
+        if "CentroCusto" not in df.columns: df["CentroCusto"] = "Geral"; notes.append("CentroCusto ausente: 'Geral'.")
 
-    df["Devedor"] = to_num_safe(df["Devedor"]).fillna(0.0)
-    df["Credor"]  = to_num_safe(df["Credor"]).fillna(0.0)
+        # Devedor/Credor/Saldo
+        if "Devedor" not in df.columns and "Credor" not in df.columns:
+            cand = next((c for c in ["Saldo","Valor","Total"] if c in df.columns), None)
+            if cand:
+                v = to_num_safe(df[cand]).fillna(0.0)
+                df["Devedor"] = np.where(v >= 0, v, 0.0)
+                df["Credor"]  = np.where(v < 0, -v, 0.0)
+                notes.append(f"Sem Devedor/Credor: derivado de '{cand}'.")
+            else:
+                df["Devedor"] = 0.0; df["Credor"] = 0.0; notes.append("Sem valores: Devedor=0/Credor=0.")
+        else:
+            if "Devedor" not in df.columns: df["Devedor"] = 0.0; notes.append("Devedor ausente: 0.")
+            if "Credor"  not in df.columns: df["Credor"]  = 0.0; notes.append("Credor ausente: 0.")
+        df["Devedor"] = to_num_safe(df["Devedor"]).fillna(0.0)
+        df["Credor"]  = to_num_safe(df["Credor"]).fillna(0.0)
 
-    # Natureza
-    conta_str = df["ContaCodigo"].astype(str).str.strip()
-    desc_str  = df["ContaDescricao"].astype(str).str.lower()
-    natureza = np.select(
-        [conta_str.str.startswith("3"), conta_str.str.startswith("4")],
-        ["Receita","Despesa"], default="Outros"
-    )
-    mask_out = natureza == "Outros"
-    if mask_out.any():
-        kw_rec  = desc_str.str.contains(r"receit|fatur|venda|renda|loca", regex=True)
-        kw_desp = desc_str.str.contains(r"despes|custo|impost|taxa|encargo|manuten|pessoal|administr", regex=True)
-        natureza = np.where(mask_out & kw_rec,  "Receita", natureza)
-        natureza = np.where((natureza=="Outros") & kw_desp, "Despesa", natureza)
-    if not (np.isin(natureza, ["Receita","Despesa"]).any()):  # fallback pelo sinal
-        valor = (df["Devedor"] - df["Credor"])
-        natureza = np.where(valor < 0, "Receita", "Despesa")
+        conta_str = df["ContaCodigo"].astype(str).str.strip()
+        desc_str  = df["ContaDescricao"].astype(str).str.lower()
+        natureza  = np.select([conta_str.str.startswith("3"), conta_str.str.startswith("4")],
+                              ["Receita","Despesa"], default="Outros")
+        mask_out  = (natureza=="Outros")
+        if mask_out.any():
+            kw_rec  = desc_str.str.contains(r"receit|fatur|venda|renda|loca", regex=True)
+            kw_desp = desc_str.str.contains(r"despes|custo|impost|taxa|encargo|manuten|pessoal|administr", regex=True)
+            natureza = np.where(mask_out & kw_rec, "Receita", natureza)
+            natureza = np.where((natureza=="Outros") & kw_desp, "Despesa", natureza)
+        if not np.isin(natureza, ["Receita","Despesa"]).any():
+            valor = df["Devedor"] - df["Credor"]
+            natureza = np.where(valor < 0, "Receita", "Despesa")
 
-    df["Natureza"] = natureza
-    df["Sinal"]    = np.select([df["Natureza"].eq("Receita"), df["Natureza"].eq("Despesa")], [-1, 1], default=1)
-    df["Saldo"]    = df["Devedor"] - df["Credor"]
-    df["SaldoGerencial"] = df["Saldo"] * df["Sinal"]
+        df["Natureza"] = natureza
+        df["Sinal"]    = np.select([df["Natureza"].eq("Receita"), df["Natureza"].eq("Despesa")], [-1, 1], default=1)
+        df["Saldo"]    = df["Devedor"] - df["Credor"]
+        df["SaldoGerencial"] = df["Saldo"] * df["Sinal"]
 
-    df["Competencia"] = pd.to_datetime(df["Competencia"], errors="coerce")
-    df["AnoMes"] = df["Competencia"].dt.strftime("%Y-%m")
-    if df["AnoMes"].isna().all():
-        df["AnoMes"] = pd.Timestamp(date.today().replace(day=1)).strftime("%Y-%m")
+        df["AnoMes"] = df["Competencia"].dt.strftime("%Y-%m")
+        df["CentroCusto"] = df["CentroCusto"].astype(str).str.strip()
+        df["CentroCustoNorm"] = df["CentroCusto"].map(strip_accents_upper)
+        for c in ["Empresa","ContaCodigo","ContaDescricao"]:
+            df[c] = df[c].astype(str).str.strip()
 
-    # Normalização de CentroCusto p/ comparação segura (resolve LOGÍSTICA vs Logistica)
-    df["CentroCusto"] = df["CentroCusto"].astype(str).str.strip()
-    df["CentroCustoNorm"] = df["CentroCusto"].map(strip_accents_upper)
-
-    # strings
-    for c in ["Empresa","ContaCodigo","ContaDescricao"]:
-        if c in df.columns: df[c] = df[c].astype(str).str.strip()
-
-    return df, notes
+        notes.append("Formato **LONGO** detectado.")
+        return df, notes, False, None
 
 with st.spinner("Processando seu arquivo..."):
-    df, notes = load_dataframe_from_bytes(file_bytes, file_name)
+    df, notes, is_matrix_mode, matrix_departments = load_and_prepare(file_bytes, file_name)
 
 if notes:
     st.warning("Ajustes aplicados automaticamente:\n- " + "\n- ".join(notes))
 
-# ─────────────────────────────── Filtros ───────────────────────────────
+# ───────────── Filtros ─────────────
 empresas  = sorted(df["Empresa"].dropna().unique().tolist())
-naturezas = sorted(df["Natureza"].dropna().unique().tolist())
-# Mostra os nomes originais, mas filtra usando a versão normalizada
+naturezas = sorted([n for n in df["Natureza"].dropna().unique().tolist() if n in ("Receita","Despesa")])
 centros_display = sorted(df["CentroCusto"].dropna().unique().tolist())
 centros_norm_map = {c: strip_accents_upper(c) for c in centros_display}
 
 colf1, colf2, colf3 = st.columns(3)
 with colf1: f_emp = st.multiselect("Empresa", empresas, default=empresas)
-with colf2: f_nat = st.multiselect("Natureza", [n for n in naturezas if n!="Outros"] or naturezas,
-                                   default=[n for n in naturezas if n!="Outros"] or naturezas)
-with colf3: f_cc_display  = st.multiselect("Centro de Custo", centros_display, default=centros_display)
-
+with colf2: f_nat = st.multiselect("Natureza", naturezas or ["Receita","Despesa"], default=naturezas or ["Receita","Despesa"])
+with colf3: f_cc_display = st.multiselect("Centro de Custo", centros_display, default=centros_display)
 f_cc_norm = [centros_norm_map[c] for c in f_cc_display]
 
-# Competência por índice (1 mês → sem slider)
 meses = sorted(df["AnoMes"].dropna().unique().tolist())
 if len(meses) == 0:
     st.warning("Sem competências válidas."); st.stop()
@@ -265,35 +271,32 @@ mask = (
 )
 df_f = df.loc[mask].copy()
 
-# ─────────────────────────────── KPIs ──────────────────────────────────
-# Receita/Despesa positivas para leitura; Caixa = Receita - Despesa
+# ───────────── KPIs (Receita/Despesa positivas; Caixa = Receita − Despesa) ─────────────
 receita_pos = -df_f.loc[df_f["Natureza"]=="Receita","SaldoGerencial"].sum()
 despesa_pos =  df_f.loc[df_f["Natureza"]=="Despesa","SaldoGerencial"].sum()
 caixa = receita_pos - despesa_pos
 margem = (caixa / receita_pos) if receita_pos else np.nan
 
-colA, colB, colC, colD = st.columns(4)
-with colA: st.metric("Receita",  money(receita_pos))
-with colB: st.metric("Despesa",  money(despesa_pos))
-with colC: st.metric("Caixa (Receita − Despesa)", money(caixa))
-with colD: st.metric("Margem %", money((margem*100) if np.isfinite(margem) else 0))
-
+c1, c2, c3, c4 = st.columns(4)
+with c1: st.metric("Receita", money(receita_pos))
+with c2: st.metric("Despesa", money(despesa_pos))
+with c3: st.metric("Caixa (Receita − Despesa)", money(caixa))
+with c4: st.metric("Margem %", money((margem*100) if np.isfinite(margem) else 0))
 st.markdown("---")
 
-# ───────────────────────── Abas de Análise (inclui comparador) ───────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "1) Receita x Despesa por C.C.", 
-    "2) Deep‑dive por Centro", 
-    "3) Comparativo de Centros (x − x = valor)", 
-    "4) Departamentos só com Despesa", 
-    "5) Margem no Tempo", 
-    "6) Top Receitas & Despesas", 
-    "7) Tabela / Exportar"
+# ───────────── Abas ─────────────
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "1) Receita x Despesa por Centro",
+    "2) Deep‑dive por Centro",
+    "3) Comparar Departamentos (A vs B)",
+    "4) Top 10 Receitas & Despesas",
+    "5) Margem no Tempo",
+    "6) Tabela / Exportar",
 ])
 
 with tab1:
     st.subheader("Receita x Despesa por Centro de Custo")
-    por_cc = df_f.groupby(["CentroCusto","CentroCustoNorm","Natureza"], as_index=False)["SaldoGerencial"].sum()
+    por_cc = df_f.groupby(["CentroCusto","Natureza"], as_index=False)["SaldoGerencial"].sum()
     if por_cc.empty:
         st.info("Sem dados nos filtros.")
     else:
@@ -307,68 +310,68 @@ with tab1:
 
 with tab2:
     st.subheader("Deep‑dive por Centro de Custo")
-    cc_sel_display = st.selectbox("Escolha um Centro de Custo", options=sorted(centros_display))
-    cc_sel_norm = strip_accents_upper(cc_sel_display)
-    df_cc = df_f[df_f["CentroCustoNorm"]==cc_sel_norm].copy()
-    if df_cc.empty:
-        st.info("Sem dados para o centro selecionado dentro dos filtros atuais.")
+    if centros_display:
+        cc_sel_display = st.selectbox("Escolha um Centro", options=sorted(centros_display))
+        df_cc = df_f[df_f["CentroCusto"]==cc_sel_display].copy()
+        if df_cc.empty:
+            st.info("Sem dados para o centro selecionado dentro dos filtros atuais.")
+        else:
+            ag = df_cc.groupby(["ContaCodigo","ContaDescricao","Natureza"], as_index=False)["SaldoGerencial"].sum()
+            ag["ValorPos"] = np.where(ag["Natureza"].eq("Receita"), -ag["SaldoGerencial"], ag["SaldoGerencial"])
+            ag["Abs"] = ag["ValorPos"].abs()
+            top = ag.sort_values("Abs", ascending=False).head(15)
+            fig = px.bar(top, x="ContaDescricao", y="ValorPos", color="Natureza")
+            st.plotly_chart(fig, use_container_width=True)
     else:
-        st.markdown("**Top 15 contas por valor absoluto (Receita positiva / Despesa positiva)**")
-        ag = df_cc.groupby(["ContaCodigo","ContaDescricao","Natureza"], as_index=False)["SaldoGerencial"].sum()
-        ag["ValorPos"] = np.where(ag["Natureza"].eq("Receita"), -ag["SaldoGerencial"], ag["SaldoGerencial"])
-        ag["Abs"] = ag["ValorPos"].abs()
-        top = ag.sort_values("Abs", ascending=False).head(15)
-        fig = px.bar(top, x="ContaDescricao", y="ValorPos", color="Natureza")
-        st.plotly_chart(fig, use_container_width=True)
+        st.info("Sem centros de custo no arquivo.")
 
 with tab3:
-    st.subheader("Comparativo de Centros (x − x = valor)")
-    colc1, colc2, colc3 = st.columns([1,1,1])
-    with colc1:
-        a_display = st.selectbox("Centro A", options=sorted(centros_display), key="cmp_a")
-    with colc2:
-        b_display = st.selectbox("Centro B", options=sorted(centros_display), key="cmp_b")
-    with colc3:
-        nat_cmp = st.selectbox("Natureza", options=["Receita","Despesa","Ambos"], index=2)
-
-    a_norm, b_norm = strip_accents_upper(a_display), strip_accents_upper(b_display)
-    df_cmp = df_f[df_f["CentroCustoNorm"].isin([a_norm, b_norm])].copy()
-    if nat_cmp != "Ambos":
-        df_cmp = df_cmp[df_cmp["Natureza"]==nat_cmp]
-    # Receita positiva para leitura
-    df_cmp["ValorPos"] = np.where(df_cmp["Natureza"].eq("Receita"), -df_cmp["SaldoGerencial"], df_cmp["SaldoGerencial"])
-    somas = df_cmp.groupby("CentroCustoNorm", as_index=False)["ValorPos"].sum()
-    va = float(somas.loc[somas["CentroCustoNorm"]==a_norm, "ValorPos"].sum()) if (somas["CentroCustoNorm"]==a_norm).any() else 0.0
-    vb = float(somas.loc[somas["CentroCustoNorm"]==b_norm, "ValorPos"].sum()) if (somas["CentroCustoNorm"]==b_norm).any() else 0.0
-    diff = va - vb
-    m1, m2, m3 = st.columns(3)
-    with m1: st.metric(f"{a_display} (A)", money(va))
-    with m2: st.metric(f"{b_display} (B)", money(vb))
-    with m3: st.metric("A − B", money(diff))
-    base = pd.DataFrame({"Centro":[a_display,b_display], "Valor":[va,vb]})
-    st.plotly_chart(px.bar(base, x="Centro", y="Valor"), use_container_width=True)
+    st.subheader("Comparar Departamentos (A vs B)")
+    # Se veio de MATRIZ, usa a lista original de departamentos para UX melhor
+    opts = sorted(centros_display) if centros_display else (sorted(matrix_departments) if is_matrix_mode else [])
+    if not opts:
+        st.info("Sem centros para comparar.")
+    else:
+        colx, coly, colz = st.columns([1,1,1])
+        with colx: a = st.selectbox("Departamento A", options=opts, key="cmp_a")
+        with coly: b = st.selectbox("Departamento B", options=opts, key="cmp_b")
+        with colz: nat_cmp = st.selectbox("Natureza", options=["Receita","Despesa"], index=1)
+        df_cmp = df_f[df_f["CentroCusto"].isin([a,b]) & (df_f["Natureza"]==nat_cmp)]
+        if df_cmp.empty:
+            st.info("Sem dados para a combinação selecionada.")
+        else:
+            df_cmp["ValorPos"] = np.where(df_cmp["Natureza"].eq("Receita"), -df_cmp["SaldoGerencial"], df_cmp["SaldoGerencial"])
+            sx = df_cmp.groupby("CentroCusto", as_index=False)["ValorPos"].sum()
+            va = float(sx.loc[sx["CentroCusto"]==a, "ValorPos"].sum()) if (sx["CentroCusto"]==a).any() else 0.0
+            vb = float(sx.loc[sx["CentroCusto"]==b, "ValorPos"].sum()) if (sx["CentroCusto"]==b).any() else 0.0
+            diff = va - vb
+            m1, m2, m3 = st.columns(3)
+            with m1: st.metric(f"{a} (A)", money(va))
+            with m2: st.metric(f"{b} (B)", money(vb))
+            with m3: st.metric("A − B", money(diff))
+            base = pd.DataFrame({"Centro":[a,b], "Valor":[va,vb]})
+            st.plotly_chart(px.bar(base, x="Centro", y="Valor"), use_container_width=True)
 
 with tab4:
-    st.subheader("Departamentos com apenas Despesas (sem Receita)")
-    # Usa pivot para garantir robustez
-    pv = df_f.pivot_table(index=["CentroCusto","CentroCustoNorm"], columns="Natureza",
-                          values="SaldoGerencial", aggfunc="sum", fill_value=0).reset_index()
-    # Receita positiva p/ leitura
-    if "Receita" in pv.columns:
-        pv["ReceitaPos"] = -pv["Receita"]
+    st.subheader("Top 10 Receitas & Top 10 Despesas")
+    # Receitas
+    rec = df_f[df_f["Natureza"]=="Receita"].groupby("ContaDescricao", as_index=False)["SaldoGerencial"].sum()
+    if not rec.empty:
+        rec["ReceitaPos"] = -rec["SaldoGerencial"]
+        rec = rec.sort_values("ReceitaPos", ascending=False).head(10)
+        st.plotly_chart(px.bar(rec, x="ContaDescricao", y="ReceitaPos"), use_container_width=True)
     else:
-        pv["ReceitaPos"] = 0.0
-    pv["DespesaPos"] = pv["Despesa"] if "Despesa" in pv.columns else 0.0
-    only_cost = pv[(pv["ReceitaPos"]==0) & (pv["DespesaPos"]>0)].copy()
-    if only_cost.empty:
-        st.success("Todos os centros possuem alguma receita nos filtros.")
+        st.info("Sem receitas nos filtros.")
+    # Despesas
+    dep = df_f[df_f["Natureza"]=="Despesa"].groupby("ContaDescricao", as_index=False)["SaldoGerencial"].sum()
+    if not dep.empty:
+        dep = dep.sort_values("SaldoGerencial", ascending=False).head(10)
+        st.plotly_chart(px.bar(dep, x="ContaDescricao", y="SaldoGerencial"), use_container_width=True)
     else:
-        only_cost = only_cost.sort_values("DespesaPos", ascending=True)
-        st.plotly_chart(px.bar(only_cost, x="DespesaPos", y="CentroCusto", orientation="h"), use_container_width=True)
+        st.info("Sem despesas nos filtros.")
 
 with tab5:
     st.subheader("Margem (Caixa/Receita) ao longo do tempo")
-    # Evita lambdas com índice externo: usa pivot
     pv_mens = df_f.pivot_table(index="AnoMes", columns="Natureza", values="SaldoGerencial",
                                aggfunc="sum", fill_value=0).reset_index()
     if pv_mens.empty:
@@ -387,24 +390,6 @@ with tab5:
                             use_container_width=True)
 
 with tab6:
-    st.subheader("Top 10 Receitas & Despesas")
-    # Receitas
-    rec = df_f[df_f["Natureza"]=="Receita"].groupby("ContaDescricao", as_index=False)["SaldoGerencial"].sum()
-    if not rec.empty:
-        rec["ReceitaPos"] = -rec["SaldoGerencial"]
-        rec = rec.sort_values("ReceitaPos", ascending=False).head(10)
-        st.plotly_chart(px.bar(rec, x="ContaDescricao", y="ReceitaPos"), use_container_width=True)
-    else:
-        st.info("Sem receitas nos filtros.")
-    # Despesas
-    dep = df_f[df_f["Natureza"]=="Despesa"].groupby("ContaDescricao", as_index=False)["SaldoGerencial"].sum()
-    if not dep.empty:
-        dep = dep.sort_values("SaldoGerencial", ascending=False).head(10)
-        st.plotly_chart(px.bar(dep, x="ContaDescricao", y="SaldoGerencial"), use_container_width=True)
-    else:
-        st.info("Sem despesas nos filtros.")
-
-with tab7:
     st.subheader("Tabela detalhada e Exportações")
     cols = ["Empresa","Competencia","AnoMes","CentroCusto","ContaCodigo","ContaDescricao",
             "Natureza","Devedor","Credor","Saldo","Sinal","SaldoGerencial"]
@@ -418,8 +403,7 @@ with tab7:
     st.markdown("---")
     pivot_mes = df_f.pivot_table(index="AnoMes", columns="Natureza", values="SaldoGerencial",
                                  aggfunc="sum", fill_value=0).reset_index()
-    if "Receita" in pivot_mes.columns:
-        pivot_mes["Receita"] = -pivot_mes["Receita"]  # positiva no export
+    if "Receita" in pivot_mes.columns: pivot_mes["Receita"] = -pivot_mes["Receita"]  # positiva no export
     by_cc_exp = df_f.groupby(["Natureza","CentroCusto"], as_index=False)["SaldoGerencial"] \
                     .sum().sort_values(["Natureza","SaldoGerencial"], ascending=[True, False])
     excel_bytes = to_excel_bytes({
