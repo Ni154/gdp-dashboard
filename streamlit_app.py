@@ -1,7 +1,7 @@
 # streamlit_app.py
 from datetime import date
 from io import BytesIO
-import unicodedata, re, os
+import unicodedata, re
 
 import numpy as np
 import pandas as pd
@@ -48,7 +48,6 @@ def strong_rename(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def to_num_safe(series: pd.Series) -> pd.Series:
-    # já numérico? devolve
     if pd.api.types.is_numeric_dtype(series):
         return pd.to_numeric(series, errors="coerce")
     s = series.astype(str)
@@ -62,8 +61,8 @@ def to_num_safe(series: pd.Series) -> pd.Series:
         if "," in x and "." not in x:  # 123,45
             try: return float(x.replace(",", "."))
             except: pass
-        try:  # 123,456.78  ou  1234.56
-            return float(x.replace(",", ""))
+        try:
+            return float(x.replace(",", ""))  # 123,456.78 ou 1234.56
         except: return np.nan
     return s.map(_parse)
 
@@ -110,7 +109,6 @@ with st.sidebar:
     with colb2:
         analyze_btn = st.button("🔎 Recalcular", use_container_width=True)
 
-# guarda bytes na sessão para não sumir
 if clear_btn:
     for k in ["file_bytes","file_name"]: st.session_state.pop(k, None)
 
@@ -182,8 +180,7 @@ def load_dataframe_from_bytes(b: bytes, fname: str):
         kw_desp = desc_str.str.contains(r"despes|custo|impost|taxa|encargo|manuten|pessoal|administr", regex=True)
         natureza = np.where(mask_out & kw_rec,  "Receita", natureza)
         natureza = np.where((natureza=="Outros") & kw_desp, "Despesa", natureza)
-    # fallback pelo sinal
-    if not (np.isin(natureza, ["Receita","Despesa"]).any()):
+    if not (np.isin(natureza, ["Receita","Despesa"]).any()):  # fallback pelo sinal
         valor = (df["Devedor"] - df["Credor"])
         natureza = np.where(valor < 0, "Receita", "Despesa")
 
@@ -197,7 +194,6 @@ def load_dataframe_from_bytes(b: bytes, fname: str):
     if df["AnoMes"].isna().all():
         df["AnoMes"] = pd.Timestamp(date.today().replace(day=1)).strftime("%Y-%m")
 
-    # strings
     for c in ["Empresa","ContaCodigo","ContaDescricao","CentroCusto"]:
         if c in df.columns: df[c] = df[c].astype(str).str.strip()
 
@@ -220,7 +216,7 @@ with colf2: f_nat = st.multiselect("Natureza", [n for n in naturezas if n!="Outr
                                    default=[n for n in naturezas if n!="Outros"] or naturezas)
 with colf3: f_cc  = st.multiselect("Centro de Custo", ccs, default=ccs)
 
-# Competência por índice (robusto) — 1 mês → sem slider
+# Competência por índice (1 mês → sem slider)
 meses = sorted(df["AnoMes"].dropna().unique().tolist())
 if len(meses) == 0:
     st.warning("Sem competências válidas."); st.stop()
@@ -254,9 +250,9 @@ mask = (
 df_f = df.loc[mask].copy()
 
 # ─────────────────────────────── KPIs ──────────────────────────────────
-# Receita e Despesa POSITIVAS para leitura humana
-receita_pos = -df_f.loc[df_f["Natureza"]=="Receita","SaldoGerencial"].sum()  # receita vinha negativa
-despesa_pos =  df_f.loc[df_f["Natureza"]=="Despesa","SaldoGerencial"].sum()  # despesa já positiva
+# Receita/Despesa positivas para leitura; Caixa = Receita - Despesa
+receita_pos = -df_f.loc[df_f["Natureza"]=="Receita","SaldoGerencial"].sum()
+despesa_pos =  df_f.loc[df_f["Natureza"]=="Despesa","SaldoGerencial"].sum()
 caixa = receita_pos - despesa_pos
 margem = (caixa / receita_pos) if receita_pos else np.nan
 
@@ -265,84 +261,124 @@ with colA: st.metric("Receita",  money(receita_pos))
 with colB: st.metric("Despesa",  money(despesa_pos))
 with colC: st.metric("Caixa (Receita − Despesa)", money(caixa))
 with colD: st.metric("Margem %", money((margem*100) if np.isfinite(margem) else 0))
+
 st.markdown("---")
 
-# ─────────────────────────────── Gráficos ──────────────────────────────
-c1 = st.container(); c2 = st.container(); c3 = st.container(); c4 = st.container()
+# ───────────────────────── Abas de Análise (os 5 pontos) ────────────────────────
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "1) Receita x Despesa por C.C.", 
+    "2) Deep‑dive por Centro (ex: GERAL)", 
+    "3) LOGÍSTICA — comparativo", 
+    "4) Departamentos só com Despesa", 
+    "5) Margem no Tempo", 
+    "Tabela / Exportar"
+])
 
-with c1:
-    st.subheader("📈 Resultado (Caixa) por Mês")
-    mensal = df_f.groupby("AnoMes", as_index=False).agg(
+with tab1:
+    st.subheader("Receita x Despesa por Centro de Custo")
+    por_cc = df_f.groupby(["CentroCusto","Natureza"], as_index=False)["SaldoGerencial"].sum()
+    if por_cc.empty:
+        st.info("Sem dados nos filtros.")
+    else:
+        por_cc["ValorPos"] = np.where(por_cc["Natureza"].eq("Receita"), -por_cc["SaldoGerencial"], por_cc["SaldoGerencial"])
+        # pivot para barras lado a lado
+        pivot = por_cc.pivot(index="CentroCusto", columns="Natureza", values="ValorPos").fillna(0)
+        if "Receita" not in pivot.columns: pivot["Receita"] = 0.0
+        if "Despesa" not in pivot.columns: pivot["Despesa"] = 0.0
+        pivot = pivot.reset_index()
+        fig = px.bar(pivot.sort_values("Receita", ascending=False), x="CentroCusto", y=["Receita","Despesa"], barmode="group")
+        st.plotly_chart(fig, use_container_width=True)
+
+with tab2:
+    st.subheader("Deep‑dive por Centro de Custo (ex.: GERAL)")
+    cc_sel = st.selectbox("Escolha um Centro de Custo", options=sorted(df_f["CentroCusto"].unique().tolist()))
+    df_cc = df_f[df_f["CentroCusto"]==cc_sel].copy()
+    if df_cc.empty:
+        st.info("Sem dados para o centro selecionado.")
+    else:
+        st.markdown("**Top 15 contas por valor absoluto (Receita positiva / Despesa positiva)**")
+        # agrega por conta
+        ag = df_cc.groupby(["ContaCodigo","ContaDescricao","Natureza"], as_index=False)["SaldoGerencial"].sum()
+        ag["ValorPos"] = np.where(ag["Natureza"].eq("Receita"), -ag["SaldoGerencial"], ag["SaldoGerencial"])
+        ag["Abs"] = ag["ValorPos"].abs()
+        top = ag.sort_values("Abs", ascending=False).head(15)
+        fig = px.bar(top, x="ContaDescricao", y="ValorPos", color="Natureza")
+        st.plotly_chart(fig, use_container_width=True)
+
+with tab3:
+    st.subheader("LOGÍSTICA — Receita x Despesa e Saldo")
+    df_log = df_f[df_f["CentroCusto"].str.upper()=="LOGÍSTICA"]
+    if df_log.empty:
+        st.info("Sem dados para LOGÍSTICA nos filtros.")
+    else:
+        rec = -df_log.loc[df_log["Natureza"]=="Receita","SaldoGerencial"].sum()
+        des =  df_log.loc[df_log["Natureza"]=="Despesa","SaldoGerencial"].sum()
+        sal = rec - des
+        met1, met2, met3 = st.columns(3)
+        with met1: st.metric("Receita (LOGÍSTICA)", money(rec))
+        with met2: st.metric("Despesa (LOGÍSTICA)", money(des))
+        with met3: st.metric("Saldo (LOGÍSTICA)", money(sal))
+        base = pd.DataFrame({"Categoria":["Receita","Despesa","Saldo"], "Valor":[rec, des, sal]})
+        fig = px.bar(base, x="Categoria", y="Valor")
+        st.plotly_chart(fig, use_container_width=True)
+
+with tab4:
+    st.subheader("Departamentos com apenas Despesas (sem Receita)")
+    tem_rec = df_f.groupby("CentroCusto").apply(lambda d: (d["Natureza"]=="Receita").any()).rename("TemReceita")
+    only_cost = tem_rec[~tem_rec].index.tolist()
+    if not only_cost:
+        st.success("Todos os centros possuem alguma receita nos filtros.")
+    else:
+        df_only = df_f[df_f["CentroCusto"].isin(only_cost) & (df_f["Natureza"]=="Despesa")]
+        por_cc = df_only.groupby("CentroCusto", as_index=False)["SaldoGerencial"].sum()
+        por_cc = por_cc.sort_values("SaldoGerencial", ascending=True)
+        fig = px.bar(por_cc, x="SaldoGerencial", y="CentroCusto", orientation="h")
+        st.plotly_chart(fig, use_container_width=True)
+
+with tab5:
+    st.subheader("Margem (Caixa/Receita) ao longo do tempo")
+    # monta resumo mensal
+    mens = df_f.groupby("AnoMes", as_index=False).agg(
         Receita=("SaldoGerencial", lambda s: -s[df_f.loc[s.index,"Natureza"]=="Receita"].sum()),
         Despesa=("SaldoGerencial", lambda s:  s[df_f.loc[s.index,"Natureza"]=="Despesa"].sum())
     )
-    if not mensal.empty:
-        mensal["Caixa"] = mensal["Receita"] - mensal["Despesa"]
-        fig = px.line(mensal.sort_values("AnoMes"), x="AnoMes", y=["Receita","Despesa","Caixa"], markers=True)
-        st.plotly_chart(fig, use_container_width=True)
+    if mens.empty:
+        st.info("Sem dados para calcular margem.")
     else:
-        st.info("Sem dados no período.")
+        mens["Caixa"] = mens["Receita"] - mens["Despesa"]
+        mens["Margem%"] = np.where(mens["Receita"]>0, 100*mens["Caixa"]/mens["Receita"], np.nan)
+        left, right = st.columns([2,1])
+        with left:
+            fig = px.line(mens.sort_values("AnoMes"), x="AnoMes", y=["Receita","Despesa","Caixa"], markers=True)
+            st.plotly_chart(fig, use_container_width=True)
+        with right:
+            fig2 = px.line(mens.sort_values("AnoMes"), x="AnoMes", y="Margem%", markers=True)
+            st.plotly_chart(fig2, use_container_width=True)
 
-with c2:
-    st.subheader("🏆 Top 10 Receitas (por Conta)")
-    rec = df_f[df_f["Natureza"]=="Receita"].groupby("ContaDescricao", as_index=False)["SaldoGerencial"].sum()
-    if not rec.empty:
-        rec["Receita"] = -rec["SaldoGerencial"]
-        rec = rec.sort_values("Receita", ascending=False).head(10)
-        fig = px.bar(rec, x="ContaDescricao", y="Receita")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sem receitas nos filtros.")
-
-with c3:
-    st.subheader("💸 Top 10 Despesas (por Conta)")
-    dep = df_f[df_f["Natureza"]=="Despesa"].groupby("ContaDescricao", as_index=False)["SaldoGerencial"].sum()
-    if not dep.empty:
-        dep = dep.sort_values("SaldoGerencial", ascending=False).head(10)
-        fig = px.bar(dep, x="ContaDescricao", y="SaldoGerencial")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sem despesas nos filtros.")
-
-with c4:
-    st.subheader("Despesas por Centro de Custo (ordenado)")
-    by_cc = df_f[df_f["Natureza"]=="Despesa"].groupby("CentroCusto", as_index=False)["SaldoGerencial"].sum()
-    if not by_cc.empty:
-        by_cc = by_cc.sort_values("SaldoGerencial", ascending=True)  # horizontal crescente → visual de baixo p/ cima
-        fig = px.bar(by_cc, x="SaldoGerencial", y="CentroCusto", orientation="h")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sem despesas por centro de custo nos filtros.")
-
-# ───────────────────────────── Tabela detalhada ────────────────────────
-st.subheader("Tabela detalhada")
-cols = ["Empresa","Competencia","AnoMes","CentroCusto","ContaCodigo","ContaDescricao",
-        "Natureza","Devedor","Credor","Saldo","Sinal","SaldoGerencial"]
-cols = [c for c in cols if c in df_f.columns]
-styled = (df_f[cols]
-          .sort_values(["Competencia","ContaCodigo"])
-          .reset_index(drop=True)
-          .style
-          .format({c: "{:,.2f}".format for c in ["Devedor","Credor","Saldo","SaldoGerencial"] if c in cols}))
-st.dataframe(styled, use_container_width=True, height=420)
-st.markdown("---")
-
-# ───────────────────────────── Exportações ─────────────────────────────
-st.subheader("Exportações")
-pivot_mes = df_f.pivot_table(index="AnoMes", columns="Natureza", values="SaldoGerencial",
-                             aggfunc="sum", fill_value=0).reset_index()
-# Ajusta para positivas na planilha: Receita positiva
-if "Receita" in pivot_mes.columns:
-    pivot_mes["Receita"] = -pivot_mes["Receita"]
-by_cc_exp = df_f.groupby(["Natureza","CentroCusto"], as_index=False)["SaldoGerencial"] \
-                .sum().sort_values(["Natureza","SaldoGerencial"], ascending=[True, False])
-
-excel_bytes = to_excel_bytes({
-    "Detalhado": df_f[cols],
-    "Resumo_Mensal": pivot_mes,
-    "Por_CentroCusto": by_cc_exp
-})
-st.download_button("⬇️ Excel (Detalhado + Resumos)", data=excel_bytes,
-                   file_name="analise_balancete.xlsx", key="dl_excel")
-st.download_button("⬇️ CSV Detalhado", data=df_f.to_csv(index=False).encode("utf-8"),
-                   file_name="balancete_detalhado.csv", key="dl_csv")
+with tab6:
+    st.subheader("Tabela detalhada e Exportações")
+    cols = ["Empresa","Competencia","AnoMes","CentroCusto","ContaCodigo","ContaDescricao",
+            "Natureza","Devedor","Credor","Saldo","Sinal","SaldoGerencial"]
+    cols = [c for c in cols if c in df_f.columns]
+    styled = (df_f[cols]
+              .sort_values(["Competencia","ContaCodigo"])
+              .reset_index(drop=True)
+              .style
+              .format({c: "{:,.2f}".format for c in ["Devedor","Credor","Saldo","SaldoGerencial"] if c in cols}))
+    st.dataframe(styled, use_container_width=True, height=420)
+    st.markdown("---")
+    pivot_mes = df_f.pivot_table(index="AnoMes", columns="Natureza", values="SaldoGerencial",
+                                 aggfunc="sum", fill_value=0).reset_index()
+    if "Receita" in pivot_mes.columns:
+        pivot_mes["Receita"] = -pivot_mes["Receita"]  # positiva no export
+    by_cc_exp = df_f.groupby(["Natureza","CentroCusto"], as_index=False)["SaldoGerencial"] \
+                    .sum().sort_values(["Natureza","SaldoGerencial"], ascending=[True, False])
+    excel_bytes = to_excel_bytes({
+        "Detalhado": df_f[cols],
+        "Resumo_Mensal": pivot_mes,
+        "Por_CentroCusto": by_cc_exp
+    })
+    st.download_button("⬇️ Excel (Detalhado + Resumos)", data=excel_bytes,
+                       file_name="analise_balancete.xlsx", key="dl_excel")
+    st.download_button("⬇️ CSV Detalhado", data=df_f.to_csv(index=False).encode("utf-8"),
+                       file_name="balancete_detalhado.csv", key="dl_csv")
