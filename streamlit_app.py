@@ -1,18 +1,23 @@
 # streamlit_app.py
-import streamlit as st
-import pandas as pd
-import numpy as np
+import sys
+import re
+import unicodedata
+from pathlib import Path
+from datetime import date, datetime
 from io import BytesIO
 import zipfile, io
+
+import streamlit as st
+st.set_page_config(page_title="Balancete (clicável)", page_icon="📘", layout="wide")
+
+import pandas as pd
+import numpy as np
 import plotly.express as px
 from streamlit_plotly_events import plotly_events
-from pathlib import Path
-import unicodedata
-from datetime import date, datetime
-import re
-import sys
+
+# (opcional) debug de runtime — pode remover
 st.caption(f"Python em uso: {sys.version}")
-st.set_page_config(page_title="Balancete (clicável)", page_icon="📘", layout="wide")
+
 st.title("📘 Painel de Balancete — com clique para filtrar")
 st.caption(
     "Aceita: (1) Balancete clássico (abas Balancete/Mapa_Classificacao) **ou** "
@@ -310,7 +315,7 @@ def to_excel_bytes(dfs: dict) -> bytes:
 with st.sidebar:
     st.header("⚙️ Entrada")
 
-    # 1) arquivo padrão: 08-2025.xlsx (se existir no repositório)
+    # arquivo padrão (se existir no repo)
     default_path = Path("08-2025.xlsx")
     default_hint = "08-2025.xlsx"
 
@@ -330,38 +335,36 @@ with st.sidebar:
         st.caption("Formato **matriz** detectado — nomes de aba ignorados.")
 
 # ===================== Load =====================
+@st.cache_data
+def sample_excel_bytes() -> bytes:
+    months = pd.period_range("2025-01", "2025-08", freq="M")
+    rows = []
+    for comp in [pd.Timestamp(m.start_time.date()) for m in months]:
+        for cod, desc, cc, dev, cre in [
+            ("3.1.1.01","Receita de Locação","Geral",0,1500000),
+            ("3.1.1.02","Receita de Fretes","Geral",0,200000),
+            ("3.1.1.03","Serviços Acessórios","Geral",0,50000),
+            ("4.1.1.01","Despesas com Manutenção","Operação",74000,0),
+            ("4.1.2.01","Despesas com Pessoal","RH",2200000,0),
+            ("4.1.3.01","Despesas Administrativas","ADM",90000,0),
+        ]:
+            rows.append(["Empresa Modelo", comp.date().isoformat(), cod, desc, cc, float(dev), float(cre)])
+    df_bal = pd.DataFrame(rows, columns=["Empresa","Competencia","ContaCodigo","ContaDescricao","CentroCusto","Devedor","Credor"])
+    df_map = pd.DataFrame([
+        ["3.1.1","Receita","Receitas Operacionais","Locação/Fretes",-1,"Operacional",""],
+        ["4.1.1","Despesa","Despesas Operacionais","Manutenção",1,"Operacional",""],
+        ["4.1.2","Despesa","Despesas Operacionais","Pessoal",1,"Operacional",""],
+        ["4.1.3","Despesa","Despesas Operacionais","Administrativas",1,"Operacional",""],
+    ], columns=["ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional","Observacao"])
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as w:
+        df_bal.to_excel(w, index=False, sheet_name="Balancete")
+        df_map.to_excel(w, index=False, sheet_name="Mapa_Classificacao")
+    out.seek(0)
+    return out.read()
+
 if st.session_state.get("use_sample", False):
-    # exemplo embutido
-    @st.cache_data
-    def sample_excel_bytes() -> bytes:
-        months = pd.period_range("2025-01", "2025-08", freq="M")
-        rows = []
-        for comp in [pd.Timestamp(m.start_time.date()) for m in months]:
-            for cod, desc, cc, dev, cre in [
-                ("3.1.1.01","Receita de Locação","Geral",0,1500000),
-                ("3.1.1.02","Receita de Fretes","Geral",0,200000),
-                ("3.1.1.03","Serviços Acessórios","Geral",0,50000),
-                ("4.1.1.01","Despesas com Manutenção","Operação",74000,0),
-                ("4.1.2.01","Despesas com Pessoal","RH",2200000,0),
-                ("4.1.3.01","Despesas Administrativas","ADM",90000,0),
-            ]:
-                rows.append(["Empresa Modelo", comp.date().isoformat(), cod, desc, cc, float(dev), float(cre)])
-        df_bal = pd.DataFrame(rows, columns=["Empresa","Competencia","ContaCodigo","ContaDescricao","CentroCusto","Devedor","Credor"])
-        df_map = pd.DataFrame([
-            ["3.1.1","Receita","Receitas Operacionais","Locação/Fretes",-1,"Operacional",""],
-            ["4.1.1","Despesa","Despesas Operacionais","Manutenção",1,"Operacional",""],
-            ["4.1.2","Despesa","Despesas Operacionais","Pessoal",1,"Operacional",""],
-            ["4.1.3","Despesa","Despesas Operacionais","Administrativas",1,"Operacional",""],
-        ], columns=["ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional","Observacao"])
-        out = BytesIO()
-        with pd.ExcelWriter(out, engine="xlsxwriter") as w:
-            df_bal.to_excel(w, index=False, sheet_name="Balancete")
-            df_map.to_excel(w, index=False, sheet_name="Mapa_Classificacao")
-        out.seek(0)
-        return out.read()
-
     bal, mapa = read_excel_like(io.BytesIO(sample_excel_bytes()), "Balancete", "Mapa_Classificacao", "amostra.xlsx")
-
 else:
     if up is not None:
         bal, mapa = read_excel_like(up, sheet_bal, sheet_map, getattr(up, "name", None))
