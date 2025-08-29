@@ -10,7 +10,8 @@ from pathlib import Path
 import unicodedata
 from datetime import date, datetime
 import re
-
+import sys
+st.caption(f"Python em uso: {sys.version}")
 st.set_page_config(page_title="Balancete (clicável)", page_icon="📘", layout="wide")
 st.title("📘 Painel de Balancete — com clique para filtrar")
 st.caption(
