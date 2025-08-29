@@ -14,13 +14,14 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from streamlit_plotly_events import plotly_events
+from streamlit.errors import StreamlitAPIException
 
-# (opcional) debug do runtime — pode remover
+# (opcional) debug — pode remover
 st.caption(f"Python em uso: {sys.version}")
 
 st.title("📘 Painel de Balancete — com clique para filtrar")
 st.caption(
-    "Aceita balancete clássico (abas Balancete/Mapa_Classificacao) ou planilha matriz "
+    "Aceita balancete clássico (abas Balancete/Mapa_Classificacao) OU planilha matriz "
     "(colunas Conta, Descrição, centros e Total). Clique nos gráficos para filtrar."
 )
 
@@ -50,7 +51,6 @@ def parse_comp_from_filename(name: str) -> pd.Timestamp | None:
         except Exception: return None
     return None
 
-# ===================== normalização colunas =====================
 def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
@@ -104,7 +104,6 @@ def _matrix_to_balancete(df_matrix: pd.DataFrame, empresa_default="Empresa", com
     bal["Credor"]  = pd.to_numeric(bal["Credor"], errors="coerce").fillna(0.0)
     return _norm_cols(bal)
 
-# ===================== mapa auto =====================
 def _auto_mapa_from_conta_prefix(bal: pd.DataFrame) -> pd.DataFrame:
     def split_prefix(code, n):
         if pd.isna(code): return None
@@ -124,7 +123,6 @@ def _auto_mapa_from_conta_prefix(bal: pd.DataFrame) -> pd.DataFrame:
         rows.append([p, natureza, grupo, p, sinal, "Operacional"])
     return pd.DataFrame(rows, columns=["ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional"])
 
-# ===================== sheet helpers =====================
 def _norm_sheet_name(s: str) -> str:
     return _norm_token(s)
 
@@ -144,7 +142,6 @@ def _resolve_sheet(xls: pd.ExcelFile, desired: str) -> str | None:
             if "mapa" in normed or "classific" in normed: return name
     return None
 
-# ===================== leitura principal =====================
 def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificacao", uploaded_name: str | None=None):
     def _read_xlsx(flike, fname_hint: str | None):
         xls = pd.ExcelFile(flike)
@@ -195,7 +192,6 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
     else:
         return _read_xlsx(uploaded, None)
 
-# ===================== merge + classificação =====================
 def merge_classify(bal, mapa):
     df = bal.copy()
     def split_prefix(code, n):
@@ -316,7 +312,7 @@ with colf2:
 with colf3:
     f_cc = st.multiselect("Centro de Custo", cc_list, default=cc_list, key="f_cc") if cc_list else None
 
-# ===================== SLIDER ROBUSTO (chave dinâmica para evitar conflito de estado) =====================
+# ===================== SLIDER ROBUSTO (chave dinâmica + fallback) =====================
 comp_series = pd.to_datetime(df["Competencia"], errors="coerce")
 if comp_series.notna().any():
     min_date = comp_series.min().date()
@@ -331,17 +327,29 @@ file_sig = f"{st.session_state.get('last_loaded_file','')}"
 range_sig = "range" if is_range else "single"
 slider_key = f"f_periodo::{file_sig}::{min_date.isoformat()}::{max_date.isoformat()}::{range_sig}"
 
+def _make_slider(min_date, max_date, is_range, key):
+    if is_range:
+        default_val = (min_date, max_date)
+        return st.slider("Competência (período)",
+                         min_value=min_date, max_value=max_date,
+                         value=default_val, key=key)
+    else:
+        default_val = min_date
+        return st.slider("Competência (período)",
+                         min_value=min_date, max_value=max_date,
+                         value=default_val, key=key)
+
+try:
+    f_date = _make_slider(min_date, max_date, is_range, slider_key)
+except StreamlitAPIException:
+    # limpa estado problemático e recria o widget "do zero"
+    if slider_key in st.session_state:
+        del st.session_state[slider_key]
+    f_date = _make_slider(min_date, max_date, is_range, slider_key)
+
 if is_range:
-    default_val = (min_date, max_date)
-    f_date = st.slider("Competência (período)",
-                       min_value=min_date, max_value=max_date,
-                       value=default_val, key=slider_key)
     start_dt = pd.to_datetime(f_date[0]); end_dt = pd.to_datetime(f_date[1])
 else:
-    default_val = min_date
-    f_date = st.slider("Competência (período)",
-                       min_value=min_date, max_value=max_date,
-                       value=default_val, key=slider_key)
     start_dt = pd.to_datetime(f_date); end_dt = pd.to_datetime(f_date)
 
 mask = (
