@@ -15,7 +15,7 @@ import numpy as np
 import plotly.express as px
 from streamlit_plotly_events import plotly_events
 
-# (opcional) debug de runtime — pode remover
+# (opcional) debug — pode remover
 st.caption(f"Python em uso: {sys.version}")
 
 st.title("📘 Painel de Balancete — com clique para filtrar")
@@ -38,30 +38,17 @@ def _norm_token(s: str) -> str:
     return s
 
 def parse_comp_from_filename(name: str) -> pd.Timestamp | None:
-    """
-    Extrai competência do nome do arquivo:
-    - 08-2025 / 08_2025 / 2025-08 / 2025_08 / 2025.08 / 08.2025
-    - 082025 ou 202508 (fallback)
-    """
     if not name:
         return None
     s = Path(name).stem
-
-    m = re.search(r'(?P<m>\d{2})[ _\.-/](?P<y>\d{4})', s)
-    if not m:
-        m = re.search(r'(?P<y>\d{4})[ _\.-/](?P<m>\d{2})', s)
-    if not m:
-        m = re.search(r'(?P<m>\d{2})(?P<y>\d{4})$', s)
-    if not m:
-        m = re.search(r'(?P<y>\d{4})(?P<m>\d{2})$', s)
-
+    m = re.search(r'(?P<m>\d{2})[ _\.-/](?P<y>\d{4})', s) or \
+        re.search(r'(?P<y>\d{4})[ _\.-/](?P<m>\d{2})', s) or \
+        re.search(r'(?P<m>\d{2})(?P<y>\d{4})$', s) or \
+        re.search(r'(?P<y>\d{4})(?P<m>\d{2})$', s)
     if m:
-        y = int(m.group('y'))
-        mth = int(m.group('m'))
-        try:
-            return pd.Timestamp(datetime(y, mth, 1))
-        except Exception:
-            return None
+        y = int(m.group('y')); mth = int(m.group('m'))
+        try: return pd.Timestamp(datetime(y, mth, 1))
+        except Exception: return None
     return None
 
 # ===================== normalização colunas =====================
@@ -90,21 +77,14 @@ def _is_matrix_format(df: pd.DataFrame) -> bool:
 def _matrix_to_balancete(df_matrix: pd.DataFrame, empresa_default="Empresa", comp_hint: pd.Timestamp | None=None) -> pd.DataFrame:
     dfm = df_matrix.copy()
     center_cols = [c for c in dfm.columns if c not in ["Conta", "Descrição", "Total"]]
-
-    # números pt-BR -> float
     for c in center_cols + (["Total"] if "Total" in dfm.columns else []):
         if c in dfm.columns:
             dfm[c] = (dfm[c].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
             dfm[c] = pd.to_numeric(dfm[c], errors="coerce")
-
-    # melt
     mlong = dfm.melt(id_vars=["Conta", "Descrição"], value_vars=center_cols,
                      var_name="CentroCusto", value_name="Valor").dropna(subset=["Valor"])
     mlong = mlong[mlong["CentroCusto"].astype(str).str.len() > 0]
-
-    # competência
     comp = comp_hint or pd.Timestamp(date.today().replace(day=1))
-
     bal = pd.DataFrame({
         "Empresa": empresa_default,
         "Competencia": comp,
@@ -112,22 +92,17 @@ def _matrix_to_balancete(df_matrix: pd.DataFrame, empresa_default="Empresa", com
         "ContaDescricao": mlong["Descrição"].astype(str).str.strip(),
         "CentroCusto": mlong["CentroCusto"].astype(str).str.strip(),
     })
-
     conta_str = bal["ContaCodigo"].fillna("").astype(str)
     is_receita = conta_str.str.strip().str.startswith("3")
     is_despesa = conta_str.str.strip().str.startswith("4")
     valor = mlong["Valor"].fillna(0.0)
-
     bal["Devedor"] = np.where(is_despesa, valor, 0.0)
     bal["Credor"]  = np.where(is_receita, valor, 0.0)
-
     other = ~(is_receita | is_despesa)
     bal.loc[other, "Devedor"] = np.where(other, np.where(valor >= 0, valor, 0.0), bal["Devedor"])
     bal.loc[other, "Credor"]  = np.where(other, np.where(valor < 0, -valor, 0.0), bal["Credor"])
-
     bal["Devedor"] = pd.to_numeric(bal["Devedor"], errors="coerce").fillna(0.0)
     bal["Credor"]  = pd.to_numeric(bal["Credor"], errors="coerce").fillna(0.0)
-
     return _norm_cols(bal)
 
 # ===================== mapa auto =====================
@@ -137,20 +112,16 @@ def _auto_mapa_from_conta_prefix(bal: pd.DataFrame) -> pd.DataFrame:
         parts = [p for p in str(code).split(".") if p]
         if not parts: return None
         return ".".join(parts[:min(n, len(parts))])
-
     prefixes = sorted(set(bal["ContaCodigo"].apply(lambda x: split_prefix(x, 3)).dropna()))
     rows = []
     for p in prefixes:
         first = str(p).split(".")[0]
         if first == "3":
-            natureza, sinal = "Receita", -1
-            grupo = "Receitas Operacionais"
+            natureza, sinal = "Receita", -1; grupo = "Receitas Operacionais"
         elif first == "4":
-            natureza, sinal = "Despesa", 1
-            grupo = "Despesas Operacionais"
+            natureza, sinal = "Despesa", 1; grupo = "Despesas Operacionais"
         else:
-            natureza, sinal = "Outros", 1
-            grupo = "Outros"
+            natureza, sinal = "Outros", 1; grupo = "Outros"
         rows.append([p, natureza, grupo, p, sinal, "Operacional"])
     return pd.DataFrame(rows, columns=["ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional"])
 
@@ -163,19 +134,15 @@ def _resolve_sheet(xls: pd.ExcelFile, desired: str) -> str | None:
     norm_map = {name: _norm_sheet_name(name) for name in names}
     target = _norm_sheet_name(desired)
     for name, normed in norm_map.items():
-        if normed == target:
-            return name
+        if normed == target: return name
     for name, normed in norm_map.items():
-        if target in normed or normed in target:
-            return name
+        if target in normed or normed in target: return name
     if "balancete" in target:
         for name, normed in norm_map.items():
-            if "balancete" in normed:
-                return name
+            if "balancete" in normed: return name
     if any(k in target for k in ["mapa", "classificacao", "classific"]):
         for name, normed in norm_map.items():
-            if "mapa" in normed or "classific" in normed:
-                return name
+            if "mapa" in normed or "classific" in normed: return name
     return None
 
 # ===================== leitura principal =====================
@@ -183,21 +150,13 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
     def _read_xlsx(flike, fname_hint: str | None):
         xls = pd.ExcelFile(flike)
         comp_hint = parse_comp_from_filename(fname_hint or "")
-
-        # tenta balancete clássico
         found_bal = _resolve_sheet(xls, sheet_bal)
         found_map = _resolve_sheet(xls, sheet_map)
-
-        bal, mapa = None, None
-        is_matrix = False
-
+        bal, mapa = None, None; is_matrix = False
         if found_bal:
             bal_raw = pd.read_excel(xls, sheet_name=found_bal)
             mapa_raw = pd.read_excel(xls, sheet_name=found_map) if found_map else pd.DataFrame()
-            bal = _norm_cols(bal_raw)
-            mapa = _norm_cols(mapa_raw)
-
-        # se não achar, tenta MATRIZ
+            bal = _norm_cols(bal_raw); mapa = _norm_cols(mapa_raw)
         if bal is None:
             for nm in xls.sheet_names:
                 probe = pd.read_excel(xls, sheet_name=nm, nrows=50)
@@ -206,57 +165,32 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
                     bal = _matrix_to_balancete(pd.read_excel(xls, sheet_name=nm), comp_hint=comp_hint)
                     mapa = _auto_mapa_from_conta_prefix(bal)
                     break
-
-        if bal is None:  # fallback
+        if bal is None:
             first = xls.sheet_names[0]
             bal = _norm_cols(pd.read_excel(xls, sheet_name=first))
-            if len(xls.sheet_names) > 1:
-                mapa = _norm_cols(pd.read_excel(xls, sheet_name=xls.sheet_names[1]))
-            else:
-                mapa = pd.DataFrame()
-
-        # normalizações mínimas
-        if "Empresa" not in bal.columns:
-            bal["Empresa"] = "Empresa"
-        if "Competencia" not in bal.columns:
-            bal["Competencia"] = comp_hint or pd.Timestamp(date.today().replace(day=1))
-        if "ContaCodigo" not in bal.columns and "Conta" in bal.columns:
-            bal.rename(columns={"Conta": "ContaCodigo"}, inplace=True)
-        if "ContaDescricao" not in bal.columns and "Descrição" in bal.columns:
-            bal.rename(columns={"Descrição": "ContaDescricao"}, inplace=True)
-
+            mapa = _norm_cols(pd.read_excel(xls, sheet_name=xls.sheet_names[1])) if len(xls.sheet_names) > 1 else pd.DataFrame()
+        if "Empresa" not in bal.columns: bal["Empresa"] = "Empresa"
+        if "Competencia" not in bal.columns: bal["Competencia"] = comp_hint or pd.Timestamp(date.today().replace(day=1))
+        if "ContaCodigo" not in bal.columns and "Conta" in bal.columns: bal.rename(columns={"Conta": "ContaCodigo"}, inplace=True)
+        if "ContaDescricao" not in bal.columns and "Descrição" in bal.columns: bal.rename(columns={"Descrição": "ContaDescricao"}, inplace=True)
         if "Devedor" not in bal.columns or "Credor" not in bal.columns:
-            cand_val = None
-            for c in ["Saldo", "Valor", "Total"]:
-                if c in bal.columns:
-                    cand_val = c
-                    break
+            cand_val = next((c for c in ["Saldo","Valor","Total"] if c in bal.columns), None)
             if cand_val:
                 v = (bal[cand_val].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
                 v = pd.to_numeric(v, errors="coerce").fillna(0.0)
-                if "Devedor" not in bal.columns:
-                    bal["Devedor"] = np.where(v >= 0, v, 0.0)
-                if "Credor" not in bal.columns:
-                    bal["Credor"] = np.where(v < 0, -v, 0.0)
+                if "Devedor" not in bal.columns: bal["Devedor"] = np.where(v >= 0, v, 0.0)
+                if "Credor"  not in bal.columns: bal["Credor"]  = np.where(v < 0, -v, 0.0)
             else:
-                bal["Devedor"] = 0.0
-                bal["Credor"] = 0.0
-
+                bal["Devedor"] = 0.0; bal["Credor"] = 0.0
         bal["Competencia"] = pd.to_datetime(bal["Competencia"], errors="coerce")
         bal["Devedor"] = pd.to_numeric(bal["Devedor"], errors="coerce").fillna(0.0)
         bal["Credor"]  = pd.to_numeric(bal["Credor"], errors="coerce").fillna(0.0)
-
-        if mapa is None or mapa.empty:
-            mapa = _auto_mapa_from_conta_prefix(bal)
+        if mapa is None or mapa.empty: mapa = _auto_mapa_from_conta_prefix(bal)
         for c in ["ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional"]:
-            if c not in mapa.columns:
-                mapa[c] = np.nan
+            if c not in mapa.columns: mapa[c] = np.nan
         mapa["Sinal"] = pd.to_numeric(mapa["Sinal"], errors="coerce").fillna(1.0)
-
-        # salva na sessão para controlar a UI
         st.session_state["is_matrix"] = is_matrix
         return bal, mapa
-
     if hasattr(uploaded, "name"):
         return _read_xlsx(uploaded, getattr(uploaded, "name", None))
     else:
@@ -265,33 +199,27 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
 # ===================== merge + classificação =====================
 def merge_classify(bal, mapa):
     df = bal.copy()
-
     def split_prefix(code, n):
         if pd.isna(code): return None
         parts = [p for p in str(code).split(".") if p]
         if not parts: return None
         return ".".join(parts[:min(n, len(parts))])
-
     df["prefix3"] = df["ContaCodigo"].apply(lambda x: split_prefix(x, 3))
     df["prefix2"] = df["ContaCodigo"].apply(lambda x: split_prefix(x, 2))
     df["prefix1"] = df["ContaCodigo"].apply(lambda x: split_prefix(x, 1))
-
     m3 = df.merge(mapa.add_prefix("m3_"), left_on="prefix3", right_on="m3_ContaPrefixo", how="left")
     m2 = df.merge(mapa.add_prefix("m2_"), left_on="prefix2", right_on="m2_ContaPrefixo", how="left")
     m1 = df.merge(mapa.add_prefix("m1_"), left_on="prefix1", right_on="m1_ContaPrefixo", how="left")
-
     def coalesce(*cols):
         out = cols[0].copy()
         for c in cols[1:]: out = out.where(~out.isna(), c)
         return out
-
     out = df.copy()
     out["Natureza"]        = coalesce(m3.get("m3_Natureza"),        m2.get("m2_Natureza"),        m1.get("m1_Natureza"))
     out["GrupoGerencial"]  = coalesce(m3.get("m3_GrupoGerencial"),  m2.get("m2_GrupoGerencial"),  m1.get("m1_GrupoGerencial"))
     out["Subgrupo"]        = coalesce(m3.get("m3_Subgrupo"),        m2.get("m2_Subgrupo"),        m1.get("m1_Subgrupo"))
     out["Sinal"]           = coalesce(m3.get("m3_Sinal"),           m2.get("m2_Sinal"),           m1.get("m1_Sinal")).fillna(1.0)
     out["TipoOperacional"] = coalesce(m3.get("m3_TipoOperacional"), m2.get("m2_TipoOperacional"), m1.get("m1_TipoOperacional"))
-
     out["Saldo"] = out["Devedor"] - out["Credor"]
     out["Sinal"] = pd.to_numeric(out["Sinal"], errors="coerce").fillna(1.0)
     out["SaldoGerencial"] = out["Saldo"] * out["Sinal"]
@@ -314,24 +242,17 @@ def to_excel_bytes(dfs: dict) -> bytes:
 # ===================== Sidebar =====================
 with st.sidebar:
     st.header("⚙️ Entrada")
-
-    # arquivo padrão (se existir no repo)
-    default_path = Path("08-2025.xlsx")
-    default_hint = "08-2025.xlsx"
-
+    default_path = Path("08-2025.xlsx"); default_hint = "08-2025.xlsx"
     use_sample = st.toggle("Usar dados de exemplo", value=False, key="use_sample")
     up = None
     if not use_sample:
         up = st.file_uploader("Envie .xlsx ou .zip com .xlsx", type=["xlsx","zip"], key="uploader")
-
-    # controla exibição dos campos de aba (somem quando matriz é detectada)
     is_matrix = st.session_state.get("is_matrix", False)
     if not is_matrix:
         sheet_bal = st.text_input("Aba do Balancete", "Balancete", key="sheet_bal")
         sheet_map = st.text_input("Aba do Mapa", "Mapa_Classificacao", key="sheet_map")
     else:
-        sheet_bal = "Balancete"
-        sheet_map = "Mapa_Classificacao"
+        sheet_bal = "Balancete"; sheet_map = "Mapa_Classificacao"
         st.caption("Formato **matriz** detectado — nomes de aba ignorados.")
 
 # ===================== Load =====================
@@ -354,7 +275,7 @@ def sample_excel_bytes() -> bytes:
         ["3.1.1","Receita","Receitas Operacionais","Locação/Fretes",-1,"Operacional",""],
         ["4.1.1","Despesa","Despesas Operacionais","Manutenção",1,"Operacional",""],
         ["4.1.2","Despesa","Despesas Operacionais","Pessoal",1,"Operacional",""],
-        ["4.1.3","Despesa","Despesas Operacionais","Administrativas",1,"Operacional",""],
+        ["4.1.3","Despesa","Despesas Administrativas","ADM",1,"Operacional",""],
     ], columns=["ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional","Observacao"])
     out = BytesIO()
     with pd.ExcelWriter(out, engine="xlsxwriter") as w:
@@ -393,7 +314,7 @@ with colf2:
 with colf3:
     f_cc = st.multiselect("Centro de Custo", cc_list, default=cc_list, key="f_cc") if cc_list else None
 
-# slider robusto (funciona com 1 ou várias competências)
+# ===================== SLIDER ROBUSTO (com reset se valor antigo estiver inválido) =====================
 comp_series = pd.to_datetime(df["Competencia"], errors="coerce")
 if comp_series.notna().any():
     min_date = comp_series.min().date()
@@ -404,19 +325,34 @@ else:
     max_date = min_date
 
 is_range = min_date < max_date
+
+def _in_bounds(val, lo, hi):
+    try:
+        if isinstance(val, (list, tuple)) and len(val) == 2:
+            a, b = val
+            return (lo <= a <= hi) and (lo <= b <= hi) and (a <= b)
+        return lo <= val <= hi
+    except Exception:
+        return False
+
+# limpa estado se tipo mudou OU se valor ficou fora do novo intervalo
 if "f_periodo" in st.session_state:
     prev = st.session_state["f_periodo"]
     prev_is_range = isinstance(prev, (list, tuple))
-    if is_range != prev_is_range:
+    if (is_range != prev_is_range) or (not _in_bounds(prev, min_date, max_date)):
         del st.session_state["f_periodo"]
 
 if is_range:
-    f_date = st.slider("Competência (período)", min_value=min_date, max_value=max_date,
-                       value=st.session_state.get("f_periodo", (min_date, max_date)), key="f_periodo")
+    f_date = st.slider("Competência (período)",
+                       min_value=min_date, max_value=max_date,
+                       value=st.session_state.get("f_periodo", (min_date, max_date)),
+                       key="f_periodo")
     start_dt = pd.to_datetime(f_date[0]); end_dt = pd.to_datetime(f_date[1])
 else:
-    f_date = st.slider("Competência (período)", min_value=min_date, max_value=max_date,
-                       value=st.session_state.get("f_periodo", min_date), key="f_periodo")
+    f_date = st.slider("Competência (período)",
+                       min_value=min_date, max_value=max_date,
+                       value=st.session_state.get("f_periodo", min_date),
+                       key="f_periodo")
     start_dt = pd.to_datetime(f_date); end_dt = pd.to_datetime(f_date)
 
 mask = (
@@ -537,7 +473,6 @@ with c_export:
                                  aggfunc="sum", fill_value=0).reset_index()
     by_grupo = df_f.groupby(["Natureza","GrupoGerencial"], as_index=False)["SaldoGerencial"] \
                    .sum().sort_values(["Natureza","SaldoGerencial"], ascending=[True, False])
-
     excel_bytes = to_excel_bytes({"Detalhado": df_f[show_cols], "Resumo_Mensal": pivot_mes, "Por_Grupo": by_grupo})
     st.download_button("⬇️ Excel (Detalhado + Resumos)", data=excel_bytes,
                        file_name="analise_balancete.xlsx", key="dl_excel")
