@@ -7,61 +7,147 @@ import zipfile, io
 import plotly.express as px
 from streamlit_plotly_events import plotly_events
 from pathlib import Path
-import unicodedata  # p/ normalizar acentos
+import unicodedata
 
 st.set_page_config(page_title="Balancete (clicável)", page_icon="📘", layout="wide")
 st.title("📘 Painel de Balancete — com clique para filtrar")
 st.caption("Envie .xlsx (ou .zip com .xlsx) com as abas **Balancete** e **Mapa_Classificacao**. Clique nos gráficos para filtrar KPIs e Tabela.")
 
-# ---------- helpers
-def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-    aliases = {
-        "Conta": "ContaCodigo", "Conta Código": "ContaCodigo",
-        "Descrição": "ContaDescricao", "Descricao": "ContaDescricao",
-        "DataCompetencia": "Competencia", "Competência": "Competencia",
-        "Centro de Custo": "CentroCusto",
-    }
-    for a, b in aliases.items():
-        if a in df.columns and b not in df.columns:
-            df.rename(columns={a: b}, inplace=True)
-    return df
-
-def split_prefix(code, n):
-    if pd.isna(code): return None
-    parts = [p for p in str(code).split(".") if p]
-    if not parts: return None
-    return ".".join(parts[:min(n, len(parts))])
-
-# ---------- normalização de nomes de abas (robustez p/ erro de sheet_name)
+# ---------- helpers básicos
 def _strip_accents(s: str) -> str:
     if s is None: return ""
     s = unicodedata.normalize("NFKD", str(s))
     return "".join(ch for ch in s if not unicodedata.combining(ch))
 
-def _norm_sheet_name(s: str) -> str:
+def _norm_token(s: str) -> str:
     s = _strip_accents(s).lower()
-    for ch in [" ", "_", "-", "."]:
+    for ch in [" ", "_", "-", ".", "/"]:
         s = s.replace(ch, "")
     return s
+
+def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+def _apply_aliases_balancete(df: pd.DataFrame) -> pd.DataFrame:
+    """Mapeia variações comuns para colunas-alvo do balancete."""
+    df = df.copy()
+    norm_map = {_norm_token(c): c for c in df.columns}
+
+    # Alvos
+    targets = {
+        "Empresa": [
+            "empresa", "filial", "razaosocial", "razao", "entidade", "company"
+        ],
+        "Competencia": [
+            "competencia", "datacompetencia", "competenciacontabil", "periodo", "mes", "data"
+        ],
+        "ContaCodigo": [
+            "contacodigo", "contacontabil", "codigoconta", "codigo", "conta", "contacodigoaux"
+        ],
+        "ContaDescricao": [
+            "contadescricao", "descricao", "historico", "nomeconta", "descconta", "desconta"
+        ],
+        "CentroCusto": [
+            "centrocusto", "centrodecusto", "ccusto", "cc", "ccod", "c.custo", "centrocust"
+        ],
+        "Devedor": [
+            "devedor", "debito", "debito1", "valordebito", "saldodevedor", "debitos", "entradas"
+        ],
+        "Credor": [
+            "credor", "credito", "credito1", "valorcredito", "saldocredor", "creditos", "saidas"
+        ],
+        "Saldo": [
+            "saldo", "saldofinal", "saldomes", "saldocontabil"
+        ],
+    }
+
+    rename = {}
+    for tgt, keys in targets.items():
+        for k in keys:
+            if k in norm_map:
+                rename[norm_map[k]] = tgt
+                break
+
+    if rename:
+        df.rename(columns=rename, inplace=True)
+
+    # Se só houver Saldo e não houver Devedor/Credor, cria ambos a partir de Saldo
+    if "Saldo" in df.columns and (("Devedor" not in df.columns) or ("Credor" not in df.columns)):
+        # tenta parse numérico de Saldo
+        s = df["Saldo"].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+        s = pd.to_numeric(s, errors="coerce").fillna(0.0)
+        if "Devedor" not in df.columns:
+            df["Devedor"] = np.where(s > 0, s, 0.0)
+        if "Credor" not in df.columns:
+            df["Credor"] = np.where(s < 0, -s, 0.0)
+
+    # Se Competencia existir como string tipo "2025-01" ou data, normaliza
+    if "Competencia" in df.columns:
+        df["Competencia"] = pd.to_datetime(df["Competencia"], errors="coerce")
+    # Normaliza numéricos
+    for col in ["Devedor", "Credor"]:
+        if col in df.columns:
+            df[col] = (df[col].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    # Se Empresa não existir, cria padrão
+    if "Empresa" not in df.columns:
+        df["Empresa"] = "Empresa"
+
+    return df
+
+def _apply_aliases_mapa(df: pd.DataFrame) -> pd.DataFrame:
+    """Mapeia variações comuns para colunas do mapa de classificação."""
+    df = df.copy()
+    norm_map = {_norm_token(c): c for c in df.columns}
+    targets = {
+        "ContaPrefixo": ["contaprefixo", "prefixo", "contagrupo", "prefixoconta"],
+        "Natureza": ["natureza", "tipo", "tiponatureza"],
+        "GrupoGerencial": ["grupogerencial", "grupoger", "grupo", "gruporesultado"],
+        "Subgrupo": ["subgrupo", "subgr", "subclasse"],
+        "Sinal": ["sinal", "multiplicador", "fator", "ajuste"],
+        "TipoOperacional": ["tipooperacional", "operacional", "tipoop"],
+    }
+    rename = {}
+    for tgt, keys in targets.items():
+        for k in keys:
+            if k in norm_map:
+                rename[norm_map[k]] = tgt
+                break
+    if rename:
+        df.rename(columns=rename, inplace=True)
+
+    # Normaliza Sinal
+    if "Sinal" in df.columns:
+        df["Sinal"] = (df["Sinal"].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
+        df["Sinal"] = pd.to_numeric(df["Sinal"], errors="coerce").fillna(1.0)
+    else:
+        df["Sinal"] = 1.0
+
+    # Garante colunas mínimas
+    for c in ["ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional"]:
+        if c not in df.columns:
+            df[c] = np.nan
+
+    return df
+
+# ---------- achar abas por nome/conteúdo
+def _norm_sheet_name(s: str) -> str:
+    return _norm_token(s)
 
 def _resolve_sheet(xls: pd.ExcelFile, desired: str) -> str | None:
     names = list(xls.sheet_names)
     norm_map = {name: _norm_sheet_name(name) for name in names}
     target = _norm_sheet_name(desired)
 
-    # 1) match exato normalizado
     for name, normed in norm_map.items():
         if normed == target:
             return name
-
-    # 2) contém
     for name, normed in norm_map.items():
         if target in normed or normed in target:
             return name
-
-    # 3) heurísticas por palavra-chave
     if "balancete" in target:
         for name, normed in norm_map.items():
             if "balancete" in normed:
@@ -70,72 +156,70 @@ def _resolve_sheet(xls: pd.ExcelFile, desired: str) -> str | None:
         for name, normed in norm_map.items():
             if "mapa" in normed or "classific" in normed:
                 return name
-
     return None
 
 def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificacao"):
-    # conjuntos de colunas esperadas para detecção por conteúdo
     need_bal = {"Empresa","Competencia","ContaCodigo","ContaDescricao","Devedor","Credor"}
     likely_mapa_cols = {"ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional"}
 
     def _read_xlsx(flike):
         xls = pd.ExcelFile(flike)
 
-        # 1) tentar resolver por nome (aproximação)
+        # 1) tentar por nome
         found_bal = _resolve_sheet(xls, sheet_bal)
         found_map = _resolve_sheet(xls, sheet_map)
 
-        # 2) se não achou por nome, detectar pelo CONTEÚDO (colunas)
+        # 2) detectar por conteúdo, se necessário
         cand_bal, cand_map = None, None
         if not found_bal or not found_map:
             for name in xls.sheet_names:
-                # lê só o header (rápido) — pandas sempre lê cabeçalho sem dados
-                tmp = pd.read_excel(xls, sheet_name=name, nrows=5)
-                cols = set(_norm_cols(tmp).columns)
-                # heurística balancete: tem as colunas essenciais
-                if need_bal.issubset(cols):
-                    cand_bal = name if cand_bal is None else cand_bal
-                # heurística mapa: tem pelo menos 2 colunas típicas do mapa
-                if len(likely_mapa_cols.intersection(cols)) >= 2:
-                    cand_map = name if cand_map is None else cand_map
+                tmp = pd.read_excel(xls, sheet_name=name, nrows=50)  # pega algumas linhas
+                tmp = _apply_aliases_balancete(_norm_cols(tmp))
+                cols = set(tmp.columns)
+                if len(need_bal.intersection(cols)) >= 4:  # tem várias chaves do balancete
+                    cand_bal = cand_bal or name
 
-            # preencher se faltou
+                tmp2 = pd.read_excel(xls, sheet_name=name, nrows=50)
+                tmp2 = _apply_aliases_mapa(_norm_cols(tmp2))
+                cols2 = set(tmp2.columns)
+                if len(likely_mapa_cols.intersection(cols2)) >= 2:
+                    cand_map = cand_map or name
+
             if not found_bal and cand_bal:
                 found_bal = cand_bal
             if not found_map and cand_map:
-                # evitar escolher a mesma planilha do bal
                 if cand_map == found_bal and len(xls.sheet_names) > 1:
-                    # tenta outra que pareça mapa
                     for name in xls.sheet_names:
                         if name != found_bal:
-                            tmp = pd.read_excel(xls, sheet_name=name, nrows=5)
-                            cols = set(_norm_cols(tmp).columns)
-                            if len(likely_mapa_cols.intersection(cols)) >= 2:
+                            tmp2 = pd.read_excel(xls, sheet_name=name, nrows=50)
+                            tmp2 = _apply_aliases_mapa(_norm_cols(tmp2))
+                            cols2 = set(tmp2.columns)
+                            if len(likely_mapa_cols.intersection(cols2)) >= 2:
                                 cand_map = name
                                 break
                 found_map = cand_map
 
-        # 3) fallbacks finais: 1ª e 2ª abas
+        # 3) fallback: 1ª e outra
         if not found_bal and len(xls.sheet_names) >= 1:
             found_bal = xls.sheet_names[0]
         if not found_map:
-            # qualquer outra que não seja a bal
             others = [n for n in xls.sheet_names if n != found_bal]
             found_map = others[0] if others else xls.sheet_names[0]
 
-        # se ainda der problema, sobe mensagem clara
-        if not found_bal or not found_map:
-            raise ValueError(
-                f"Não encontrei as abas esperadas. Disponíveis: {xls.sheet_names}. "
-                f"Tentado: '{sheet_bal}' e '{sheet_map}'."
-            )
-
-        # lê de fato
+        # lê
         bal = pd.read_excel(xls, sheet_name=found_bal)
         mapa = pd.read_excel(xls, sheet_name=found_map)
+
+        # normaliza com aliases inteligentes
+        bal = _apply_aliases_balancete(_norm_cols(bal))
+        mapa = _apply_aliases_mapa(_norm_cols(mapa))
+
+        # valida mínimos do balancete
+        miss = need_bal - set(bal.columns)
+        if miss:
+            raise ValueError(f"Planilha Balancete faltando colunas obrigatórias: {miss}")
         return bal, mapa
 
-    # ZIP com xlsx dentro
     if hasattr(uploaded, "name") and str(uploaded.name).lower().endswith(".zip"):
         with zipfile.ZipFile(uploaded) as z:
             xlsx_names = [n for n in z.namelist() if n.lower().endswith(".xlsx")]
@@ -147,35 +231,24 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
     else:
         bal, mapa = _read_xlsx(uploaded)
 
-    # normaliza colunas
-    bal, mapa = _norm_cols(bal), _norm_cols(mapa)
-
+    # pós-processamento numérico e datas (já feito em aliases; apenas reforço)
     if "Competencia" in bal.columns:
         bal["Competencia"] = pd.to_datetime(bal["Competencia"], errors="coerce")
     for col in ["Devedor", "Credor"]:
         if col in bal.columns:
-            bal[col] = (bal[col].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
             bal[col] = pd.to_numeric(bal[col], errors="coerce").fillna(0.0)
 
-    if "Sinal" in mapa.columns:
-        mapa["Sinal"] = (mapa["Sinal"].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
-        mapa["Sinal"] = pd.to_numeric(mapa["Sinal"], errors="coerce").fillna(1.0)
-    else:
-        mapa["Sinal"] = 1.0
-
-    # validações mínimas
-    miss = need_bal - set(bal.columns)
-    if miss:
-        raise ValueError(f"Planilha Balancete faltando colunas obrigatórias: {miss}")
-
-    for c in ["ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional"]:
-        if c not in mapa.columns:
-            mapa[c] = np.nan
-    mapa["Sinal"] = mapa["Sinal"].fillna(1.0)
     return bal, mapa
 
 def merge_classify(bal, mapa):
     df = bal.copy()
+    # prefixos
+    def split_prefix(code, n):
+        if pd.isna(code): return None
+        parts = [p for p in str(code).split(".") if p]
+        if not parts: return None
+        return ".".join(parts[:min(n, len(parts))])
+
     df["prefix3"] = df["ContaCodigo"].apply(lambda x: split_prefix(x, 3))
     df["prefix2"] = df["ContaCodigo"].apply(lambda x: split_prefix(x, 2))
     df["prefix1"] = df["ContaCodigo"].apply(lambda x: split_prefix(x, 1))
@@ -186,7 +259,8 @@ def merge_classify(bal, mapa):
 
     def coalesce(*cols):
         out = cols[0].copy()
-        for c in cols[1:]: out = out.where(~out.isna(), c)
+        for c in cols[1:]:
+            out = out.where(~out.isna(), c)
         return out
 
     out = df.copy()
@@ -204,8 +278,10 @@ def merge_classify(bal, mapa):
     return out
 
 def metric_fmt(v):
-    try: return f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
-    except: return str(v)
+    try:
+        return f"{float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
+    except:
+        return str(v)
 
 def to_excel_bytes(dfs: dict) -> bytes:
     out = BytesIO()
@@ -350,13 +426,10 @@ resultado = receita + despesa
 margem = (resultado / receita) if receita else np.nan
 with colA:
     st.metric("Receita", metric_fmt(receita))
-
 with colB:
     st.metric("Despesa", metric_fmt(despesa))
-
 with colC:
     st.metric("Resultado", metric_fmt(resultado))
-
 with colD:
     st.metric("Margem %", metric_fmt((margem * 100) if pd.notna(margem) else 0))
 st.markdown("---")
@@ -389,7 +462,7 @@ with c_despesas:
     if not dep.empty:
         dep = dep.sort_values("SaldoGerencial")
         fig_bar = px.bar(dep, x="SaldoGerencial", y="GrupoGerencial",
-                         orientation="h", color="GrupoGerencial")  # cores por grupo
+                         orientation="h", color="GrupoGerencial")
         sel = plotly_events(fig_bar, click_event=True, hover_event=False, select_event=False,
                             override_height=420, override_width="100%", key="ev_despesas_grp")
         if sel:
@@ -405,7 +478,7 @@ with c_receitas:
     rec = df_f[df_f["Natureza"]=="Receita"].groupby("Subgrupo", as_index=False)["SaldoGerencial"].sum()
     if not rec.empty:
         rec = rec.sort_values("SaldoGerencial", ascending=False).head(10)
-        fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial", color="Subgrupo")  # cores por subgrupo
+        fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial", color="Subgrupo")
         sel = plotly_events(fig_rec, click_event=True, hover_event=False, select_event=False,
                             override_height=420, override_width="100%", key="ev_receitas_sub")
         if sel:
