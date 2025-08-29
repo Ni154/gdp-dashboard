@@ -1,4 +1,3 @@
-        
 # streamlit_app.py
 import streamlit as st
 import pandas as pd
@@ -7,6 +6,7 @@ from io import BytesIO
 import zipfile, io
 import plotly.express as px
 from streamlit_plotly_events import plotly_events
+from pathlib import Path  # <<< adicionado
 
 st.set_page_config(page_title="Balancete (clicável)", page_icon="📘", layout="wide")
 st.title("📘 Painel de Balancete — com clique para filtrar")
@@ -157,17 +157,32 @@ with st.sidebar:
         up = st.file_uploader("Envie .xlsx ou .zip com .xlsx", type=["xlsx","zip"], key="uploader")
     sheet_bal = st.text_input("Aba do Balancete", "Balancete", key="sheet_bal")
     sheet_map = st.text_input("Aba do Mapa", "Mapa_Classificacao", key="sheet_map")
+
+    # Info extra quando arquivo padrão está disponível
+    x_default = Path("Exemplo_Balancete.xlsx")
+    if x_default.exists() and not use_sample and not up:
+        st.info("Nenhum arquivo enviado — carregando arquivo local **Exemplo_Balancete.xlsx** automaticamente.")
+
     st.download_button("⬇️ Baixar Excel de Exemplo", data=sample_excel_bytes(),
                        file_name="Exemplo_Balancete.xlsx", key="dl_sample")
 
 # ---------- load
+# 1) Se "usar exemplo": gera e carrega
 if st.session_state.get("use_sample", False):
     bal, mapa = read_excel_like(io.BytesIO(sample_excel_bytes()), sheet_bal, sheet_map)
 else:
-    if not up:
-        st.info("Envie um arquivo ou ative **Usar dados de exemplo** na barra lateral.")
-        st.stop()
-    bal, mapa = read_excel_like(up, sheet_bal, sheet_map)
+    # 2) Se houver upload, usa o enviado
+    if up:
+        bal, mapa = read_excel_like(up, sheet_bal, sheet_map)
+    else:
+        # 3) Fallback: se existir Exemplo_Balancete.xlsx no diretório do app, usa este
+        default_path = Path("Exemplo_Balancete.xlsx")
+        if default_path.exists():
+            with default_path.open("rb") as f:
+                bal, mapa = read_excel_like(f, sheet_bal, sheet_map)
+        else:
+            st.info("Envie um arquivo, ative **Usar dados de exemplo** ou inclua **Exemplo_Balancete.xlsx** junto do app.")
+            st.stop()
 
 df = merge_classify(bal, mapa)
 
@@ -278,7 +293,7 @@ with c_despesas:
     dep = df_f[df_f["Natureza"]=="Despesa"].groupby("GrupoGerencial", as_index=False)["SaldoGerencial"].sum()
     if not dep.empty:
         dep = dep.sort_values("SaldoGerencial")
-        # >>> ALTERAÇÃO: adiciona cores por GrupoGerencial
+        # cores por GrupoGerencial
         fig_bar = px.bar(dep, x="SaldoGerencial", y="GrupoGerencial",
                          orientation="h", color="GrupoGerencial")
         sel = plotly_events(fig_bar, click_event=True, hover_event=False, select_event=False,
@@ -296,7 +311,7 @@ with c_receitas:
     rec = df_f[df_f["Natureza"]=="Receita"].groupby("Subgrupo", as_index=False)["SaldoGerencial"].sum()
     if not rec.empty:
         rec = rec.sort_values("SaldoGerencial", ascending=False).head(10)
-        # >>> ALTERAÇÃO: adiciona cores por Subgrupo
+        # cores por Subgrupo
         fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial", color="Subgrupo")
         sel = plotly_events(fig_rec, click_event=True, hover_event=False, select_event=False,
                             override_height=420, override_width="100%", key="ev_receitas_sub")
