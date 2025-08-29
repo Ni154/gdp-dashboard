@@ -12,9 +12,11 @@ from datetime import date
 
 st.set_page_config(page_title="Balancete (clicável)", page_icon="📘", layout="wide")
 st.title("📘 Painel de Balancete — com clique para filtrar")
-st.caption("Envie .xlsx (ou .zip com .xlsx) com as abas **Balancete** e **Mapa_Classificacao**. "
-           "Também aceita planilhas em formato **matriz** (Conta, Descrição, centros e Total). "
-           "Clique nos gráficos para filtrar KPIs e Tabela.")
+st.caption(
+    "Envie .xlsx (ou .zip com .xlsx) com as abas **Balancete** e **Mapa_Classificacao**. "
+    "Também aceita planilhas em formato **matriz** (Conta, Descrição, centros e Total). "
+    "Clique nos gráficos para filtrar KPIs e Tabela."
+)
 
 # ---------- util
 def _strip_accents(s: str) -> str:
@@ -32,7 +34,6 @@ def _norm_token(s: str) -> str:
 def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
-    # aliases básicos
     aliases = {
         "Conta": "ContaCodigo", "Conta Código": "ContaCodigo", "Conta Contábil": "ContaCodigo",
         "Descrição": "ContaDescricao", "Descricao": "ContaDescricao", "Histórico": "ContaDescricao",
@@ -47,27 +48,24 @@ def _norm_cols(df: pd.DataFrame) -> pd.DataFrame:
 # ---------- conversor: planilha MATRIZ -> balancete-like
 def _is_matrix_format(df: pd.DataFrame) -> bool:
     cols = set(df.columns.astype(str))
-    if not {"Conta", "Descrição"}.issubset(cols):  # cabeçalhos originais
+    if not {"Conta", "Descrição"}.issubset(cols):
         return False
-    centers = [c for c in df.columns if c not in ["Conta", "Descrição"]]  # vários centros (e possivelmente Total)
+    centers = [c for c in df.columns if c not in ["Conta", "Descrição"]]
     return len(centers) >= 2
 
 def _matrix_to_balancete(df_matrix: pd.DataFrame, empresa_default="Empresa") -> pd.DataFrame:
     dfm = df_matrix.copy()
     center_cols = [c for c in dfm.columns if c not in ["Conta", "Descrição", "Total"]]
 
-    # Converte números pt-BR -> float
     for c in center_cols + ["Total"]:
         if c in dfm.columns:
             dfm[c] = (dfm[c].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
             dfm[c] = pd.to_numeric(dfm[c], errors="coerce")
 
-    # Longo
     mlong = dfm.melt(id_vars=["Conta", "Descrição"], value_vars=center_cols,
                      var_name="CentroCusto", value_name="Valor").dropna(subset=["Valor"])
     mlong = mlong[mlong["CentroCusto"].astype(str).str.len() > 0]
 
-    # Monta balancete-like
     bal = pd.DataFrame({
         "Empresa": empresa_default,
         "Competencia": pd.Timestamp(date.today().replace(day=1)),
@@ -148,7 +146,7 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
     def _read_xlsx(flike):
         xls = pd.ExcelFile(flike)
 
-        # Tenta modo balancete clássico
+        # 1) tenta modo balancete clássico
         found_bal = _resolve_sheet(xls, sheet_bal)
         found_map = _resolve_sheet(xls, sheet_map)
 
@@ -160,7 +158,7 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
             bal = _norm_cols(bal_raw)
             mapa = _norm_cols(mapa_raw)
 
-        # Se não achar, tenta formato MATRIZ
+        # 2) se não achar, tenta formato MATRIZ (Conta, Descrição, centros, Total)
         if bal is None:
             for nm in xls.sheet_names:
                 probe = pd.read_excel(xls, sheet_name=nm, nrows=50)
@@ -169,6 +167,7 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
                     mapa = _auto_mapa_from_conta_prefix(bal)
                     break
 
+        # 3) fallback: 1ª aba bal, 2ª mapa (se existir)
         if bal is None:
             first = xls.sheet_names[0]
             bal = _norm_cols(pd.read_excel(xls, sheet_name=first))
@@ -178,7 +177,7 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
             else:
                 mapa = pd.DataFrame()
 
-        # Normalizações finais mínimas
+        # --- normalizações mínimas
         if "Empresa" not in bal.columns:
             bal["Empresa"] = "Empresa"
         if "Competencia" not in bal.columns:
@@ -360,7 +359,7 @@ with colf2:
 with colf3:
     f_cc = st.multiselect("Centro de Custo", cc_list, default=cc_list, key="f_cc") if cc_list else None
 
-# ---------- slider robusto (corrige erro quando min=max ou quando datas são NaT)
+# ---------- slider robusto (resolve erro quando muda entre range e valor único)
 comp_series = pd.to_datetime(df["Competencia"], errors="coerce")
 if comp_series.notna().any():
     min_date = comp_series.min().date()
@@ -370,18 +369,29 @@ else:
     min_date = today.replace(day=1)
     max_date = min_date
 
-if min_date == max_date:
+is_range = min_date < max_date
+
+# evita conflito de tipos no mesmo key entre runs
+if "f_periodo" in st.session_state:
+    prev = st.session_state["f_periodo"]
+    prev_is_range = isinstance(prev, (list, tuple))
+    if is_range != prev_is_range:
+        del st.session_state["f_periodo"]
+
+if is_range:
     f_date = st.slider("Competência (período)",
                        min_value=min_date, max_value=max_date,
-                       value=min_date, key="f_periodo")
-    start_dt = pd.to_datetime(f_date)
-    end_dt   = pd.to_datetime(f_date)
+                       value=st.session_state.get("f_periodo", (min_date, max_date)),
+                       key="f_periodo")
+    start_dt = pd.to_datetime(f_date[0])
+    end_dt   = pd.to_datetime(f_date[1])
 else:
     f_date = st.slider("Competência (período)",
                        min_value=min_date, max_value=max_date,
-                       value=(min_date, max_date), key="f_periodo")
-    start_dt = pd.to_datetime(f_date[0])
-    end_dt   = pd.to_datetime(f_date[1])
+                       value=st.session_state.get("f_periodo", min_date),
+                       key="f_periodo")
+    start_dt = pd.to_datetime(f_date)
+    end_dt   = pd.to_datetime(f_date)
 
 mask = (
     df["Empresa"].isin(f_emp)
@@ -467,8 +477,9 @@ with c_despesas:
     dep = df_f[df_f["Natureza"]=="Despesa"].groupby("GrupoGerencial", as_index=False)["SaldoGerencial"].sum()
     if not dep.empty:
         dep = dep.sort_values("SaldoGerencial")
-        fig_bar = px.bar(dep, x="SaldoGerencial", y="GrupoGerencial",
-                         orientation="h", color="GrupoGerencial")  # cores por grupo
+        fig_bar = px.bar(
+            dep, x="SaldoGerencial", y="GrupoGerencial", orientation="h", color="GrupoGerencial"
+        )
         sel = plotly_events(fig_bar, click_event=True, hover_event=False, select_event=False,
                             override_height=420, override_width="100%", key="ev_despesas_grp")
         if sel:
@@ -484,7 +495,7 @@ with c_receitas:
     rec = df_f[df_f["Natureza"]=="Receita"].groupby("Subgrupo", as_index=False)["SaldoGerencial"].sum()
     if not rec.empty:
         rec = rec.sort_values("SaldoGerencial", ascending=False).head(10)
-        fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial", color="Subgrupo")  # cores por subgrupo
+        fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial", color="Subgrupo")
         sel = plotly_events(fig_rec, click_event=True, hover_event=False, select_event=False,
                             override_height=420, override_width="100%", key="ev_receitas_sub")
         if sel:
@@ -501,8 +512,10 @@ with c_tabela:
                  "Natureza","GrupoGerencial","Subgrupo","Devedor","Credor",
                  "Saldo","Sinal","SaldoGerencial","AnoMes"]
     show_cols = [c for c in show_cols if c in df_f.columns]
-    st.dataframe(df_f[show_cols].sort_values(["Competencia","ContaCodigo"]).reset_index(drop=True),
-                 use_container_width=True, key="grid_detalhe")
+    st.dataframe(
+        df_f[show_cols].sort_values(["Competencia","ContaCodigo"]).reset_index(drop=True),
+        use_container_width=True, key="grid_detalhe"
+    )
 
 with c_export:
     st.subheader("Exportações")
