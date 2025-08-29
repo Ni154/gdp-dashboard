@@ -315,64 +315,54 @@ with colf2:
 with colf3:
     f_cc = st.multiselect("Centro de Custo", cc_list, default=cc_list, key="f_cc") if cc_list else None
 
-# ===================== SLIDER ROBUSTO (chave dinâmica + limpeza total de estado + fallback) =====================
-comp_series = pd.to_datetime(df["Competencia"], errors="coerce")
-if comp_series.notna().any():
-    min_date = comp_series.min().date()
-    max_date = comp_series.max().date()
-else:
-    today = date.today()
-    min_date = today.replace(day=1)
-    max_date = min_date
+# ===================== SLIDER POR ÍNDICE DE MÊS (robusto a troca/renomeio) =====================
+# criamos a lista de meses disponíveis (YYYY-MM), ordenada
+df["AnoMes"] = df["AnoMes"].astype(str)
+meses = sorted(df["AnoMes"].dropna().unique().tolist())
+if not meses:
+    st.warning("Sem competências válidas no arquivo.")
+    st.stop()
 
-# garante ordem válida
-if min_date > max_date:
-    min_date, max_date = max_date, min_date
+min_idx, max_idx = 0, len(meses) - 1
+is_range = max_idx > min_idx
 
-is_range = min_date < max_date
 file_sig = f"{st.session_state.get('last_loaded_file','') or 'arquivo_sem_nome'}"
-range_sig = "range" if is_range else "single"
-slider_key = f"f_periodo::{file_sig}::{min_date.isoformat()}::{max_date.isoformat()}::{range_sig}"
+slider_key = f"mes_idx::{file_sig}::{len(meses)}"
 
-# 1) Remove estados antigos de outros sliders
+# limpamos estados antigos de sliders de mês (se existirem)
 for k in list(st.session_state.keys()):
-    if k.startswith("f_periodo::") and k != slider_key:
+    if k.startswith("mes_idx::") and k != slider_key:
         del st.session_state[k]
 
-def _make_slider(min_d, max_d, is_rng, key):
+def _make_month_index_slider(lo, hi, is_rng, key):
     if is_rng:
-        return st.slider(
-            "Competência (período)",
-            min_value=min_d, max_value=max_d,
-            value=(min_d, max_d),
-            key=key,
-        )
+        return st.slider("Competência (período)",
+                         min_value=lo, max_value=hi,
+                         value=(lo, hi), key=key)
     else:
-        return st.slider(
-            "Competência (período)",
-            min_value=min_d, max_value=max_d,
-            value=min_d,
-            key=key,
-        )
+        return st.slider("Competência (período)",
+                         min_value=lo, max_value=hi,
+                         value=lo, key=key)
 
-# 2) Cria o slider; se der qualquer erro, zera o estado e recria
 try:
-    f_date = _make_slider(min_date, max_date, is_range, slider_key)
+    sel = _make_month_index_slider(min_idx, max_idx, is_range, slider_key)
 except Exception:
     if slider_key in st.session_state:
         del st.session_state[slider_key]
-    f_date = _make_slider(min_date, max_date, is_range, slider_key)
+    sel = _make_month_index_slider(min_idx, max_idx, is_range, slider_key)
 
-# 3) Normaliza o resultado para datetimes
 if is_range:
-    start_dt = pd.to_datetime(f_date[0]); end_dt = pd.to_datetime(f_date[1])
+    start_idx, end_idx = sel
 else:
-    start_dt = pd.to_datetime(f_date);    end_dt = pd.to_datetime(f_date)
+    start_idx = end_idx = sel
 
-# aplica filtros
+start_ym = meses[start_idx]
+end_ym   = meses[end_idx]
+
+# filtramos por AnoMes (string) — evita qualquer problema de timezone/tipos
 mask = (
     df["Empresa"].isin(f_emp)
-    & df["Competencia"].between(start_dt, end_dt)
+    & df["AnoMes"].between(start_ym, end_ym)
     & ((df["Natureza"].isin(f_nat)) if df["Natureza"].notna().any() else True)
 )
 if f_cc is not None:
