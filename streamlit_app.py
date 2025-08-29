@@ -7,7 +7,7 @@ import zipfile, io
 import plotly.express as px
 from streamlit_plotly_events import plotly_events
 from pathlib import Path
-import unicodedata  # <<< (novo) para normalizar acentos
+import unicodedata  # p/ normalizar acentos
 
 st.set_page_config(page_title="Balancete (clicável)", page_icon="📘", layout="wide")
 st.title("📘 Painel de Balancete — com clique para filtrar")
@@ -66,7 +66,7 @@ def _resolve_sheet(xls: pd.ExcelFile, desired: str) -> str | None:
         for name, normed in norm_map.items():
             if "balancete" in normed:
                 return name
-    if any(k in target for k in ["mapa", "classificacao", "classificacao", "classific"]):
+    if any(k in target for k in ["mapa", "classificacao", "classific"]):
         for name, normed in norm_map.items():
             if "mapa" in normed or "classific" in normed:
                 return name
@@ -74,29 +74,68 @@ def _resolve_sheet(xls: pd.ExcelFile, desired: str) -> str | None:
     return None
 
 def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificacao"):
+    # conjuntos de colunas esperadas para detecção por conteúdo
+    need_bal = {"Empresa","Competencia","ContaCodigo","ContaDescricao","Devedor","Credor"}
+    likely_mapa_cols = {"ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional"}
+
     def _read_xlsx(flike):
         xls = pd.ExcelFile(flike)
+
+        # 1) tentar resolver por nome (aproximação)
         found_bal = _resolve_sheet(xls, sheet_bal)
         found_map = _resolve_sheet(xls, sheet_map)
 
-        # fallbacks seguros
+        # 2) se não achou por nome, detectar pelo CONTEÚDO (colunas)
+        cand_bal, cand_map = None, None
+        if not found_bal or not found_map:
+            for name in xls.sheet_names:
+                # lê só o header (rápido) — pandas sempre lê cabeçalho sem dados
+                tmp = pd.read_excel(xls, sheet_name=name, nrows=5)
+                cols = set(_norm_cols(tmp).columns)
+                # heurística balancete: tem as colunas essenciais
+                if need_bal.issubset(cols):
+                    cand_bal = name if cand_bal is None else cand_bal
+                # heurística mapa: tem pelo menos 2 colunas típicas do mapa
+                if len(likely_mapa_cols.intersection(cols)) >= 2:
+                    cand_map = name if cand_map is None else cand_map
+
+            # preencher se faltou
+            if not found_bal and cand_bal:
+                found_bal = cand_bal
+            if not found_map and cand_map:
+                # evitar escolher a mesma planilha do bal
+                if cand_map == found_bal and len(xls.sheet_names) > 1:
+                    # tenta outra que pareça mapa
+                    for name in xls.sheet_names:
+                        if name != found_bal:
+                            tmp = pd.read_excel(xls, sheet_name=name, nrows=5)
+                            cols = set(_norm_cols(tmp).columns)
+                            if len(likely_mapa_cols.intersection(cols)) >= 2:
+                                cand_map = name
+                                break
+                found_map = cand_map
+
+        # 3) fallbacks finais: 1ª e 2ª abas
         if not found_bal and len(xls.sheet_names) >= 1:
             found_bal = xls.sheet_names[0]
-        if not found_map and len(xls.sheet_names) >= 2:
-            # tente uma aba diferente da primeira
-            cand = [n for n in xls.sheet_names if n != found_bal]
-            found_map = cand[0] if cand else xls.sheet_names[0]
+        if not found_map:
+            # qualquer outra que não seja a bal
+            others = [n for n in xls.sheet_names if n != found_bal]
+            found_map = others[0] if others else xls.sheet_names[0]
 
+        # se ainda der problema, sobe mensagem clara
         if not found_bal or not found_map:
             raise ValueError(
                 f"Não encontrei as abas esperadas. Disponíveis: {xls.sheet_names}. "
                 f"Tentado: '{sheet_bal}' e '{sheet_map}'."
             )
 
+        # lê de fato
         bal = pd.read_excel(xls, sheet_name=found_bal)
         mapa = pd.read_excel(xls, sheet_name=found_map)
         return bal, mapa
 
+    # ZIP com xlsx dentro
     if hasattr(uploaded, "name") and str(uploaded.name).lower().endswith(".zip"):
         with zipfile.ZipFile(uploaded) as z:
             xlsx_names = [n for n in z.namelist() if n.lower().endswith(".xlsx")]
@@ -108,6 +147,7 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
     else:
         bal, mapa = _read_xlsx(uploaded)
 
+    # normaliza colunas
     bal, mapa = _norm_cols(bal), _norm_cols(mapa)
 
     if "Competencia" in bal.columns:
@@ -123,7 +163,7 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
     else:
         mapa["Sinal"] = 1.0
 
-    need_bal = {"Empresa","Competencia","ContaCodigo","ContaDescricao","Devedor","Credor"}
+    # validações mínimas
     miss = need_bal - set(bal.columns)
     if miss:
         raise ValueError(f"Planilha Balancete faltando colunas obrigatórias: {miss}")
