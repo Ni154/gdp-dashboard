@@ -6,7 +6,8 @@ from io import BytesIO
 import zipfile, io
 import plotly.express as px
 from streamlit_plotly_events import plotly_events
-from pathlib import Path  # <<< adicionado
+from pathlib import Path
+import unicodedata  # <<< (novo) para normalizar acentos
 
 st.set_page_config(page_title="Balancete (clicável)", page_icon="📘", layout="wide")
 st.title("📘 Painel de Balancete — com clique para filtrar")
@@ -33,10 +34,68 @@ def split_prefix(code, n):
     if not parts: return None
     return ".".join(parts[:min(n, len(parts))])
 
+# ---------- normalização de nomes de abas (robustez p/ erro de sheet_name)
+def _strip_accents(s: str) -> str:
+    if s is None: return ""
+    s = unicodedata.normalize("NFKD", str(s))
+    return "".join(ch for ch in s if not unicodedata.combining(ch))
+
+def _norm_sheet_name(s: str) -> str:
+    s = _strip_accents(s).lower()
+    for ch in [" ", "_", "-", "."]:
+        s = s.replace(ch, "")
+    return s
+
+def _resolve_sheet(xls: pd.ExcelFile, desired: str) -> str | None:
+    names = list(xls.sheet_names)
+    norm_map = {name: _norm_sheet_name(name) for name in names}
+    target = _norm_sheet_name(desired)
+
+    # 1) match exato normalizado
+    for name, normed in norm_map.items():
+        if normed == target:
+            return name
+
+    # 2) contém
+    for name, normed in norm_map.items():
+        if target in normed or normed in target:
+            return name
+
+    # 3) heurísticas por palavra-chave
+    if "balancete" in target:
+        for name, normed in norm_map.items():
+            if "balancete" in normed:
+                return name
+    if any(k in target for k in ["mapa", "classificacao", "classificacao", "classific"]):
+        for name, normed in norm_map.items():
+            if "mapa" in normed or "classific" in normed:
+                return name
+
+    return None
+
 def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificacao"):
     def _read_xlsx(flike):
         xls = pd.ExcelFile(flike)
-        return pd.read_excel(xls, sheet_name=sheet_bal), pd.read_excel(xls, sheet_name=sheet_map)
+        found_bal = _resolve_sheet(xls, sheet_bal)
+        found_map = _resolve_sheet(xls, sheet_map)
+
+        # fallbacks seguros
+        if not found_bal and len(xls.sheet_names) >= 1:
+            found_bal = xls.sheet_names[0]
+        if not found_map and len(xls.sheet_names) >= 2:
+            # tente uma aba diferente da primeira
+            cand = [n for n in xls.sheet_names if n != found_bal]
+            found_map = cand[0] if cand else xls.sheet_names[0]
+
+        if not found_bal or not found_map:
+            raise ValueError(
+                f"Não encontrei as abas esperadas. Disponíveis: {xls.sheet_names}. "
+                f"Tentado: '{sheet_bal}' e '{sheet_map}'."
+            )
+
+        bal = pd.read_excel(xls, sheet_name=found_bal)
+        mapa = pd.read_excel(xls, sheet_name=found_map)
+        return bal, mapa
 
     if hasattr(uploaded, "name") and str(uploaded.name).lower().endswith(".zip"):
         with zipfile.ZipFile(uploaded) as z:
@@ -158,7 +217,6 @@ with st.sidebar:
     sheet_bal = st.text_input("Aba do Balancete", "Balancete", key="sheet_bal")
     sheet_map = st.text_input("Aba do Mapa", "Mapa_Classificacao", key="sheet_map")
 
-    # Info extra quando arquivo padrão está disponível
     x_default = Path("Exemplo_Balancete.xlsx")
     if x_default.exists() and not use_sample and not up:
         st.info("Nenhum arquivo enviado — carregando arquivo local **Exemplo_Balancete.xlsx** automaticamente.")
@@ -167,15 +225,12 @@ with st.sidebar:
                        file_name="Exemplo_Balancete.xlsx", key="dl_sample")
 
 # ---------- load
-# 1) Se "usar exemplo": gera e carrega
 if st.session_state.get("use_sample", False):
     bal, mapa = read_excel_like(io.BytesIO(sample_excel_bytes()), sheet_bal, sheet_map)
 else:
-    # 2) Se houver upload, usa o enviado
     if up:
         bal, mapa = read_excel_like(up, sheet_bal, sheet_map)
     else:
-        # 3) Fallback: se existir Exemplo_Balancete.xlsx no diretório do app, usa este
         default_path = Path("Exemplo_Balancete.xlsx")
         if default_path.exists():
             with default_path.open("rb") as f:
@@ -293,9 +348,8 @@ with c_despesas:
     dep = df_f[df_f["Natureza"]=="Despesa"].groupby("GrupoGerencial", as_index=False)["SaldoGerencial"].sum()
     if not dep.empty:
         dep = dep.sort_values("SaldoGerencial")
-        # cores por GrupoGerencial
         fig_bar = px.bar(dep, x="SaldoGerencial", y="GrupoGerencial",
-                         orientation="h", color="GrupoGerencial")
+                         orientation="h", color="GrupoGerencial")  # cores por grupo
         sel = plotly_events(fig_bar, click_event=True, hover_event=False, select_event=False,
                             override_height=420, override_width="100%", key="ev_despesas_grp")
         if sel:
@@ -311,8 +365,7 @@ with c_receitas:
     rec = df_f[df_f["Natureza"]=="Receita"].groupby("Subgrupo", as_index=False)["SaldoGerencial"].sum()
     if not rec.empty:
         rec = rec.sort_values("SaldoGerencial", ascending=False).head(10)
-        # cores por Subgrupo
-        fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial", color="Subgrupo")
+        fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial", color="Subgrupo")  # cores por subgrupo
         sel = plotly_events(fig_rec, click_event=True, hover_event=False, select_event=False,
                             override_height=420, override_width="100%", key="ev_receitas_sub")
         if sel:
