@@ -13,7 +13,7 @@ from datetime import date
 st.set_page_config(page_title="Balancete (clicável)", page_icon="📘", layout="wide")
 st.title("📘 Painel de Balancete — com clique para filtrar")
 st.caption("Envie .xlsx (ou .zip com .xlsx) com as abas **Balancete** e **Mapa_Classificacao**. "
-           "Também aceita planilhas em formato **matriz** (Conta, Descrição, centros e Total), como seu arquivo de demonstração. "
+           "Também aceita planilhas em formato **matriz** (Conta, Descrição, centros e Total). "
            "Clique nos gráficos para filtrar KPIs e Tabela.")
 
 # ---------- util
@@ -49,58 +49,45 @@ def _is_matrix_format(df: pd.DataFrame) -> bool:
     cols = set(df.columns.astype(str))
     if not {"Conta", "Descrição"}.issubset(cols):  # cabeçalhos originais
         return False
-    # precisa ter pelo menos 2 centros + Total
-    centers = [c for c in df.columns if c not in ["Conta", "Descrição"]]
+    centers = [c for c in df.columns if c not in ["Conta", "Descrição"]]  # vários centros (e possivelmente Total)
     return len(centers) >= 2
 
 def _matrix_to_balancete(df_matrix: pd.DataFrame, empresa_default="Empresa") -> pd.DataFrame:
     dfm = df_matrix.copy()
-    # Identifica colunas de centros (tudo menos Conta/Descrição/Total)
     center_cols = [c for c in dfm.columns if c not in ["Conta", "Descrição", "Total"]]
 
-    # Converte números (com ponto de milhar e vírgula decimal) -> float
+    # Converte números pt-BR -> float
     for c in center_cols + ["Total"]:
         if c in dfm.columns:
-            dfm[c] = (dfm[c]
-                      .astype(str)
-                      .str.replace(".", "", regex=False)
-                      .str.replace(",", ".", regex=False))
+            dfm[c] = (dfm[c].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
             dfm[c] = pd.to_numeric(dfm[c], errors="coerce")
 
-    # Derrete para longo: um registro por centro
+    # Longo
     mlong = dfm.melt(id_vars=["Conta", "Descrição"], value_vars=center_cols,
-                     var_name="CentroCusto", value_name="Valor")
-    mlong = mlong.dropna(subset=["Valor"])
-    # Remove linhas de totalizadores vazios/NaN
+                     var_name="CentroCusto", value_name="Valor").dropna(subset=["Valor"])
     mlong = mlong[mlong["CentroCusto"].astype(str).str.len() > 0]
 
     # Monta balancete-like
     bal = pd.DataFrame({
         "Empresa": empresa_default,
-        "Competencia": pd.Timestamp(date.today().replace(day=1)),  # um mês fixo p/ esta planilha (sem datas)
+        "Competencia": pd.Timestamp(date.today().replace(day=1)),
         "ContaCodigo": mlong["Conta"].astype(str).str.strip(),
         "ContaDescricao": mlong["Descrição"].astype(str).str.strip(),
         "CentroCusto": mlong["CentroCusto"].astype(str).str.strip(),
     })
 
-    # Regras:
-    # - Se a "Conta" começar com '3' (receitas), considera como crédito
-    # - Se começar com '4' (despesas), considera como débito
-    # - Caso contrário, usa valor >= 0 como débito por padrão
     conta_str = bal["ContaCodigo"].fillna("").astype(str)
     is_receita = conta_str.str.strip().str.startswith("3")
     is_despesa = conta_str.str.strip().str.startswith("4")
     valor = mlong["Valor"].fillna(0.0)
 
     bal["Devedor"] = np.where(is_despesa, valor, 0.0)
-    bal["Credor"] = np.where(is_receita, valor, 0.0)
+    bal["Credor"]  = np.where(is_receita, valor, 0.0)
 
-    # Se não for 3/4, distribui por sinal: positivos em Devedor, negativos (abs) em Credor
     other = ~(is_receita | is_despesa)
     bal.loc[other, "Devedor"] = np.where(other, np.where(valor >= 0, valor, 0.0), bal["Devedor"])
     bal.loc[other, "Credor"]  = np.where(other, np.where(valor < 0, -valor, 0.0), bal["Credor"])
 
-    # Calcula saldo
     bal["Devedor"] = pd.to_numeric(bal["Devedor"], errors="coerce").fillna(0.0)
     bal["Credor"]  = pd.to_numeric(bal["Credor"], errors="coerce").fillna(0.0)
 
@@ -108,7 +95,6 @@ def _matrix_to_balancete(df_matrix: pd.DataFrame, empresa_default="Empresa") -> 
 
 # ---------- mapa gerado a partir da “Conta”
 def _auto_mapa_from_conta_prefix(bal: pd.DataFrame) -> pd.DataFrame:
-    # Prefixos por 3 níveis (ex: 3.1.1)
     def split_prefix(code, n):
         if pd.isna(code): return None
         parts = [p for p in str(code).split(".") if p]
@@ -118,7 +104,6 @@ def _auto_mapa_from_conta_prefix(bal: pd.DataFrame) -> pd.DataFrame:
     prefixes = sorted(set(bal["ContaCodigo"].apply(lambda x: split_prefix(x, 3)).dropna()))
     rows = []
     for p in prefixes:
-        # Natureza por 1º dígito
         first = str(p).split(".")[0]
         if first == "3":
             natureza, sinal = "Receita", -1
@@ -129,7 +114,7 @@ def _auto_mapa_from_conta_prefix(bal: pd.DataFrame) -> pd.DataFrame:
         else:
             natureza, sinal = "Outros", 1
             grupo = "Outros"
-        subgrupo = p  # usa o próprio prefixo como subgrupo default
+        subgrupo = p
         rows.append([p, natureza, grupo, subgrupo, sinal, "Operacional"])
     mapa = pd.DataFrame(rows, columns=["ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional"])
     return mapa
@@ -169,20 +154,14 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
 
         bal, mapa = None, None
 
-        # Se localizar as abas clássicas, lê direto
         if found_bal:
             bal_raw = pd.read_excel(xls, sheet_name=found_bal)
-            if found_map:
-                mapa_raw = pd.read_excel(xls, sheet_name=found_map)
-            else:
-                mapa_raw = pd.DataFrame()
-
+            mapa_raw = pd.read_excel(xls, sheet_name=found_map) if found_map else pd.DataFrame()
             bal = _norm_cols(bal_raw)
             mapa = _norm_cols(mapa_raw)
 
-        # Caso contrário, tenta detectar a planilha MATRIZ (se tiver só uma aba, por ex.)
+        # Se não achar, tenta formato MATRIZ
         if bal is None:
-            # Tenta em todas as abas achar o formato MATRIZ
             for nm in xls.sheet_names:
                 probe = pd.read_excel(xls, sheet_name=nm, nrows=50)
                 if _is_matrix_format(probe):
@@ -191,7 +170,6 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
                     break
 
         if bal is None:
-            # Fallback duro: usa primeira aba como bal, segunda como mapa (se houver)
             first = xls.sheet_names[0]
             bal = _norm_cols(pd.read_excel(xls, sheet_name=first))
             if len(xls.sheet_names) > 1:
@@ -200,10 +178,7 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
             else:
                 mapa = pd.DataFrame()
 
-        # Normalizações finais (bal)
-        # Se ainda não tiver as colunas mínimas, tenta mapear
-        # Mínimo esperado: Empresa, Competencia, ContaCodigo, ContaDescricao, Devedor, Credor
-        # (CentroCusto é opcional)
+        # Normalizações finais mínimas
         if "Empresa" not in bal.columns:
             bal["Empresa"] = "Empresa"
         if "Competencia" not in bal.columns:
@@ -213,38 +188,29 @@ def read_excel_like(uploaded, sheet_bal="Balancete", sheet_map="Mapa_Classificac
         if "ContaDescricao" not in bal.columns and "Descrição" in bal.columns:
             bal.rename(columns={"Descrição": "ContaDescricao"}, inplace=True)
 
-        # Devedor/Credor: se vier apenas "Saldo" ou "Valor", quebra em débito/crédito por sinal
         if "Devedor" not in bal.columns or "Credor" not in bal.columns:
-            # tenta usar colunas comuns
             cand_val = None
             for c in ["Saldo", "Valor", "Total"]:
                 if c in bal.columns:
                     cand_val = c
                     break
             if cand_val:
-                v = (bal[cand_val].astype(str)
-                                .str.replace(".", "", regex=False)
-                                .str.replace(",", ".", regex=False))
+                v = (bal[cand_val].astype(str).str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
                 v = pd.to_numeric(v, errors="coerce").fillna(0.0)
                 if "Devedor" not in bal.columns:
                     bal["Devedor"] = np.where(v >= 0, v, 0.0)
                 if "Credor" not in bal.columns:
                     bal["Credor"] = np.where(v < 0, -v, 0.0)
             else:
-                # se nem isso existir, cria zero
                 bal["Devedor"] = 0.0
                 bal["Credor"] = 0.0
 
-        # Tipos finais
         bal["Competencia"] = pd.to_datetime(bal["Competencia"], errors="coerce")
         bal["Devedor"] = pd.to_numeric(bal["Devedor"], errors="coerce").fillna(0.0)
         bal["Credor"]  = pd.to_numeric(bal["Credor"], errors="coerce").fillna(0.0)
 
-        # mapa: se vazio, gera automático por prefixo
         if mapa is None or mapa.empty:
             mapa = _auto_mapa_from_conta_prefix(bal)
-
-        # garante colunas de mapa
         for c in ["ContaPrefixo","Natureza","GrupoGerencial","Subgrupo","Sinal","TipoOperacional"]:
             if c not in mapa.columns:
                 mapa[c] = np.nan
@@ -394,15 +360,32 @@ with colf2:
 with colf3:
     f_cc = st.multiselect("Centro de Custo", cc_list, default=cc_list, key="f_cc") if cc_list else None
 
-min_date = df["Competencia"].min().date()
-max_date = df["Competencia"].max().date()
-f_date = st.slider("Competência (período)",
-                   min_value=min_date, max_value=max_date,
-                   value=(min_date, max_date), key="f_periodo")
+# ---------- slider robusto (corrige erro quando min=max ou quando datas são NaT)
+comp_series = pd.to_datetime(df["Competencia"], errors="coerce")
+if comp_series.notna().any():
+    min_date = comp_series.min().date()
+    max_date = comp_series.max().date()
+else:
+    today = date.today()
+    min_date = today.replace(day=1)
+    max_date = min_date
+
+if min_date == max_date:
+    f_date = st.slider("Competência (período)",
+                       min_value=min_date, max_value=max_date,
+                       value=min_date, key="f_periodo")
+    start_dt = pd.to_datetime(f_date)
+    end_dt   = pd.to_datetime(f_date)
+else:
+    f_date = st.slider("Competência (período)",
+                       min_value=min_date, max_value=max_date,
+                       value=(min_date, max_date), key="f_periodo")
+    start_dt = pd.to_datetime(f_date[0])
+    end_dt   = pd.to_datetime(f_date[1])
 
 mask = (
     df["Empresa"].isin(f_emp)
-    & df["Competencia"].between(pd.to_datetime(f_date[0]), pd.to_datetime(f_date[1]))
+    & df["Competencia"].between(start_dt, end_dt)
     & ((df["Natureza"].isin(f_nat)) if df["Natureza"].notna().any() else True)
 )
 if f_cc is not None:
@@ -485,7 +468,7 @@ with c_despesas:
     if not dep.empty:
         dep = dep.sort_values("SaldoGerencial")
         fig_bar = px.bar(dep, x="SaldoGerencial", y="GrupoGerencial",
-                         orientation="h", color="GrupoGerencial")
+                         orientation="h", color="GrupoGerencial")  # cores por grupo
         sel = plotly_events(fig_bar, click_event=True, hover_event=False, select_event=False,
                             override_height=420, override_width="100%", key="ev_despesas_grp")
         if sel:
@@ -501,7 +484,7 @@ with c_receitas:
     rec = df_f[df_f["Natureza"]=="Receita"].groupby("Subgrupo", as_index=False)["SaldoGerencial"].sum()
     if not rec.empty:
         rec = rec.sort_values("SaldoGerencial", ascending=False).head(10)
-        fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial", color="Subgrupo")
+        fig_rec = px.bar(rec, x="Subgrupo", y="SaldoGerencial", color="Subgrupo")  # cores por subgrupo
         sel = plotly_events(fig_rec, click_event=True, hover_event=False, select_event=False,
                             override_height=420, override_width="100%", key="ev_receitas_sub")
         if sel:
